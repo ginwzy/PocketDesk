@@ -801,6 +801,7 @@
   function renderMain() {
     var el = document.getElementById('main');
     if (!el) { return; }
+    PDToolView.reset();
     var r = route();
     if (r.page !== 'chat') { PDX.detachTerminal(); }
     if (r.page === 'chat') { renderChat(); }
@@ -834,7 +835,7 @@
       '<div class="pd-composer-foot"><span class="pd-hint">Enter 发送，Shift + Enter 换行；可直接粘贴或拖入图片、文件</span>' +
       '<button class="pd-btn pd-btn-primary" id="send" data-act="send" disabled>发送</button></div>' +
       '<input type="file" id="file-any" class="pd-file-input" multiple tabindex="-1" aria-hidden="true"><input type="file" id="file-img" class="pd-file-input" accept="image/*" multiple tabindex="-1" aria-hidden="true"></div>';
-    el.innerHTML = '<header class="pd-head" id="head"></header><div class="pd-msgs" id="msgs"><div class="pd-empty">正在加载…</div></div>' + composer;
+    el.innerHTML = '<header class="pd-head" id="head"></header><div class="pd-chat-layout" id="chat-layout"><div class="pd-chat-column"><div class="pd-msgs" id="msgs"><div class="pd-empty">正在加载…</div></div>' + composer + '</div><aside id="tool-inspector" class="pd-tool-inspector" aria-label="工具详情" hidden></aside></div>';
     renderHead();
     renderPending();
     renderChosen();
@@ -870,21 +871,37 @@
   }
 
   /** renderMsgs：重绘消息；原本在底部或首次打开时滚到底部 */
-  function renderMsgs(first) {
+  function renderMsgs(first, preserve) {
     var el = document.getElementById('msgs');
     var sid = route().sid, lg = logs[sid];
     if (!el || !lg || !lg.loaded) { return; }
-    var bottom = first || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    var bottom = !preserve && (first || el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+    var oldTop = el.scrollTop, viewportTop = el.getBoundingClientRect().top;
+    var anchor = Array.prototype.filter.call(el.querySelectorAll('.pd-tool-row,.pd-tool-group-head,.pd-msg:not(.pd-tool-msg)[data-seq]'), function (node) { return node.getBoundingClientRect().bottom > viewportTop; })[0];
+    var anchorSeq = anchor && (anchor.dataset.toolSeq || anchor.dataset.seq), anchorOffset = anchor && anchor.getBoundingClientRect().top - viewportTop;
     var items = buildItems(lg.events.length ? lg.events : [{ session: sid }]);
     var s = session(sid);
+    var ws = s && wsById(s.workspaceId), root = ws ? ws.rootPath.replace(/\/$/, '') + (s.cwd && s.cwd !== '.' ? '/' + s.cwd : '') : '';
+    var toolContext = { sid: sid, root: root, icon: icon, copy: copyText, refresh: function () { renderMsgs(false, true); } };
     var out = '', lastAt = 0;
-    items.forEach(function (it) {
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
       if (it.at && it.at - lastAt > 5 * 60 * 1000) { out += '<div class="pd-msg-time">' + chatTime(it.at) + '</div>'; }
       if (it.at) { lastAt = it.at; }
-      out += itemHtml(it, s);
-    });
+      if (it.t === 'tool') {
+        var tools = [it];
+        while (i + 1 < items.length && items[i + 1].t === 'tool' && (!items[i + 1].at || items[i + 1].at - lastAt <= 5 * 60 * 1000)) { i++; tools.push(items[i]); if (items[i].at) { lastAt = items[i].at; } }
+        out += PDToolView.groupHtml(tools, toolContext);
+      } else { out += itemHtml(it, s); }
+    }
     el.innerHTML = out || '<div class="pd-empty">' + (s && s.kind === 'assistant' ? '发一条消息或拖入文件，手机上的文件传输助手马上就能收到' : '还没有消息') + '</div>';
+    PDToolView.update(items, toolContext);
     if (bottom) { el.scrollTop = el.scrollHeight; }
+    else {
+      var restored = anchorSeq && el.querySelector('[data-tool-seq="' + anchorSeq + '"],.pd-msg[data-seq="' + anchorSeq + '"]');
+      el.scrollTop = oldTop;
+      if (restored) { el.scrollTop += restored.getBoundingClientRect().top - viewportTop - anchorOffset; }
+    }
     Array.prototype.forEach.call(el.querySelectorAll('img'), function (img) {
       if (!img.complete) { img.addEventListener('load', function () { if (bottom) { el.scrollTop = el.scrollHeight; } }, { once: true }); }
     });
@@ -915,9 +932,7 @@
       case 'think':
         return '<div class="pd-msg" data-seq="' + it.seq + '"><div style="width:var(--pd-chat-avatar)"></div><div class="pd-msg-body"><details class="pd-think"><summary>' + icon('brain', 14) + (it.done ? '思考过程' : '正在思考…') + '</summary><pre>' + esc(it.text) + '</pre></details></div></div>';
       case 'tool':
-        var input = it.input && typeof it.input.command === 'string' && Object.keys(it.input).length <= 2 ? it.input.command : JSON.stringify(it.input, null, 2);
-        return '<div class="pd-msg" data-seq="' + it.seq + '"><div style="width:var(--pd-chat-avatar)"></div><div class="pd-msg-body"><details class="pd-tool' + (it.error ? ' err' : '') + '"><summary>' + icon(toolIcon(it.kind), 14) + '<span>' + esc(it.summary) + '</span>' +
-          (it.done ? '' : icon('loader', 14)) + '</summary>' + (input && input !== '{}' ? '<pre>' + esc(input) + '</pre>' : '') + (it.output ? '<pre>' + esc(it.output) + '</pre>' : '') + '</details></div></div>';
+        return '';
       case 'approval':
         mine = false; who = agentKind;
         var detail = it.input && typeof it.input.command === 'string' ? it.input.command : (it.summary || JSON.stringify(it.input, null, 2));
@@ -952,9 +967,6 @@
     return '<div class="pd-msg' + (mine ? ' mine' : '') + '" data-seq="' + it.seq + '">' + avatarHtml(who, true) + '<div class="pd-msg-body">' + body + '</div></div>';
   }
 
-  function toolIcon(kind) {
-    return { command: 'terminal', exec: 'terminal', bash: 'terminal', shell: 'terminal', read: 'file-text', write: 'pencil', edit: 'pencil', search: 'search', grep: 'search', glob: 'search', web: 'external-link', fetch: 'external-link', task: 'bot', agent: 'bot' }[kind] || 'wrench';
-  }
   function approvalTitle(kind) {
     return { command: '要执行命令', exec: '要执行命令', edit: '要修改文件', write: '要写入文件', read: '要读取文件', web: '要访问网络', fetch: '要访问网络' }[kind] || '需要你确认';
   }
@@ -1844,11 +1856,11 @@
       host = s;
       checkRequests();
       var r = route();
+      var sig = JSON.stringify((s.workspaces || []).map(function (w) { return [w.id, w.name, w.rootPath]; }));
       // 首次读到状态时绘制设置页；之后只刷新纯展示的分区，避免冲掉正在编辑的输入
       if (r.page === 'settings' && !modalRoot.innerHTML && (first || r.section === 'overview' || r.section === 'devices')) { renderMain(); }
-      if (r.page === 'chat') { renderHead(); }
+      if (r.page === 'chat') { renderHead(); if (first || sig !== wsSig) { renderMsgs(false, true); } }
       // 文件页左侧的工作区列表有变化时刷新
-      var sig = JSON.stringify((s.workspaces || []).map(function (w) { return [w.id, w.name, w.rootPath]; }));
       if (r.page === 'phone' && sig !== wsSig) { wsSig = sig; renderList(); } else { wsSig = sig; }
       if (!document.getElementById('rail') && r.page !== 'pair') { render(); }
     }).catch(function () {});
@@ -2285,12 +2297,14 @@
     }
     // 输入框保留系统菜单（粘贴等），其他地方不显示网页引擎自带的「返回、重新载入」
     if (!msg && !row) {
-      if (!e.target.closest('input,textarea,[contenteditable]')) { e.preventDefault(); }
+      if (!e.target.closest('input,textarea,[contenteditable],.pd-tool-detail-scroll')) { e.preventDefault(); }
       return;
     }
     e.preventDefault();
     if (msg) {
-      var sid = route().sid, seq = +msg.dataset.seq;
+      var toolEntry = e.target.closest('.pd-tool-entry');
+      if (msg.classList.contains('pd-tool-msg') && !toolEntry) { return; }
+      var sid = route().sid, seq = +(toolEntry ? toolEntry.querySelector('.pd-tool-row').dataset.toolSeq : msg.dataset.seq);
       var sel = String(window.getSelection() || '');
       var items = [];
       if (sel) { items.push(['copy-sel', '复制选中的文字', false, 'copy']); }

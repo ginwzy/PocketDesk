@@ -257,12 +257,7 @@ select.pd-input { cursor: pointer; }
 .pd-sys { text-align: center; margin: 10px auto; font-size: 12px; color: var(--pd-text-3); max-width: 80%; }
 .pd-sys.err { color: var(--pd-danger); }
 .pd-card-msg { background: var(--pd-bubble); border-radius: var(--pd-r-m); padding: 10px 12px; width: min(460px, 100%); }
-.pd-tool { background: var(--pd-tool); border-radius: var(--pd-r-m); font-size: 12px; width: min(560px, 100%); overflow: hidden; }
-.pd-tool summary { display: flex; align-items: center; gap: 8px; padding: 7px 10px; cursor: pointer; list-style: none; color: var(--pd-text-2); font-family: var(--pd-mono); }
-.pd-tool summary::-webkit-details-marker { display: none; }
-.pd-tool summary span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pd-tool.err summary { color: var(--pd-danger); }
-.pd-tool pre, .pd-think pre { margin: 0; padding: 8px 10px; max-height: 360px; overflow: auto; white-space: pre-wrap; word-break: break-all; font: 12px/1.5 var(--pd-mono); color: var(--pd-text-2); border-top: 1px solid var(--pd-line); user-select: text; -webkit-user-select: text; }
+.pd-think pre { margin: 0; padding: 8px 10px; max-height: 360px; overflow: auto; white-space: pre-wrap; word-break: break-all; font: 12px/1.5 var(--pd-mono); color: var(--pd-text-2); border-top: 1px solid var(--pd-line); user-select: text; -webkit-user-select: text; }
 .pd-think { font-size: 12px; color: var(--pd-text-3); width: min(560px, 100%); }
 .pd-think summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 6px; }
 .pd-think summary::-webkit-details-marker { display: none; }

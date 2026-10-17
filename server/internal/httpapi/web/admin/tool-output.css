@@ -1,0 +1,63 @@
+/* 工具使用聊天区域宽度；普通消息仍保留阅读宽度。 */
+.pd-chat-layout { flex: 1; min-height: 0; min-width: 0; display: flex; position: relative; container-type: inline-size; }
+.pd-chat-column { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.pd-tool-msg { margin: 8px 0; }
+.pd-tool-msg .pd-msg-body { flex: 1; width: 100%; max-width: 1100px; }
+.pd-tool-avatar-space { width: var(--pd-chat-avatar); flex-shrink: 0; }
+.pd-tool-group { width: 100%; background: var(--pd-tool); border-radius: var(--pd-r-m); overflow: hidden; }
+.pd-tool-group-head, .pd-tool-row { width: 100%; display: flex; align-items: center; gap: 8px; background: none; border: 0; color: var(--pd-text-2); text-align: left; cursor: pointer; }
+.pd-tool-group-head { min-height: 40px; padding: 7px 10px; font-size: 12px; }
+.pd-tool-group-caption { flex: 1; min-width: 0; text-align: right; font-size: 11px; color: var(--pd-text-3); }
+.pd-tool-entry { border-top: 1px solid var(--pd-line); }
+.pd-tool-row { min-height: 44px; padding: 8px 10px; font-size: 12px; }
+.pd-tool-row:hover, .pd-tool-group-head:hover, .pd-tool-entry.is-selected { background: var(--pd-code); }
+.pd-tool-row:focus-visible, .pd-tool-group-head:focus-visible, .pd-tool-tabs button:focus-visible { outline: 2px solid var(--pd-accent); outline-offset: -2px; }
+.pd-tool-state { color: var(--pd-accent); display: inline-flex; flex-shrink: 0; }
+.pd-tool-entry.is-error .pd-tool-state, .pd-tool-error-summary, .pd-tool-group-caption.is-error, .pd-tool-detail-status.is-error { color: var(--pd-danger); }
+.pd-tool-entry.is-running .pd-tool-state, .pd-tool-state.is-running { color: var(--pd-text-3); }
+.pd-tool-entry.is-running .pd-tool-state svg, .pd-tool-state.is-running svg { animation: pd-tool-spin 1.2s linear infinite; }
+@keyframes pd-tool-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pd-tool-entry.is-running .pd-tool-state svg, .pd-tool-state.is-running svg { animation: none; } }
+.pd-tool-row-text { display: flex; align-items: baseline; gap: 10px; flex: 1; min-width: 0; }
+.pd-tool-row-title { flex-shrink: 0; font-size: 12px; }
+.pd-tool-target { color: var(--pd-text-3); font: 12px/1.5 var(--pd-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pd-tool-count { color: var(--pd-text-3); font-size: 11px; flex-shrink: 0; }
+.pd-tool-row > svg { color: var(--pd-text-4); flex-shrink: 0; }
+.pd-tool-error-summary { padding: 0 32px 8px; font: 12px/1.5 var(--pd-mono); overflow-wrap: anywhere; }
+.pd-tool-preview { padding: 0 12px 10px 33px; }
+.pd-tool-preview-label { display: flex; align-items: center; justify-content: space-between; color: var(--pd-text-3); font-size: 11px; margin-bottom: 4px; }
+.pd-tool-preview pre { margin: 0; font: 12px/1.5 var(--pd-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--pd-text-2); user-select: text; }
+.pd-tool-inspector[hidden] { display: none; }
+.pd-tool-inspector { position: absolute; right: 0; top: 0; bottom: 0; z-index: 25; width: min(100%, 560px); min-width: 0; display: flex; flex-direction: column; background: var(--pd-panel); border-left: 1px solid var(--pd-line); box-shadow: -12px 0 32px rgba(0,0,0,.08); }
+.pd-tool-detail-head { padding: 12px 12px 4px 16px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.pd-tool-detail-head strong { font-size: 14px; font-weight: 600; }
+.pd-tool-detail-status { font-size: 11px; color: var(--pd-text-3); margin-left: 10px; }
+.pd-tool-detail-target { padding: 0 16px 12px; color: var(--pd-text-3); font: 11px/1.5 var(--pd-mono); overflow-wrap: anywhere; max-height: 66px; overflow: auto; }
+.pd-tool-detail-toolbar { display: flex; align-items: center; padding: 0 8px; border-bottom: 1px solid var(--pd-line); gap: 2px; }
+.pd-tool-tabs { display: flex; flex: 1; min-width: 0; }
+.pd-tool-tabs button { min-height: 44px; padding: 0 10px; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--pd-text-3); cursor: pointer; font-size: 12px; }
+.pd-tool-tabs button[aria-selected=true] { color: var(--pd-text); border-bottom-color: var(--pd-accent); }
+.pd-tool-wrap { min-height: 44px; padding: 0 8px; font-size: 11px; color: var(--pd-text-3); }
+.pd-tool-wrap[aria-pressed=true] { color: var(--pd-accent); }
+.pd-tool-detail-scroll { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px 24px; overscroll-behavior: contain; }
+.pd-tool-section-label { color: var(--pd-text-3); font-size: 11px; margin: 4px 0 10px; }
+.pd-tool-code { font: 12px/1.6 var(--pd-mono); margin: 0 0 16px; white-space: pre; color: var(--pd-text-2); user-select: text; -webkit-user-select: text; tab-size: 4; }
+.pd-tool-detail-scroll.wrap .pd-tool-code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.pd-tool-file { margin-bottom: 18px; }
+.pd-tool-file-head { display: flex; justify-content: space-between; gap: 8px; font: 12px/1.5 var(--pd-mono); padding: 7px 0; border-bottom: 1px solid var(--pd-line); margin-bottom: 6px; }
+.pd-tool-file-head > span { min-width: 0; overflow-wrap: anywhere; }
+.pd-tool-file-head button { flex-shrink: 0; font-family: inherit; }
+.pd-tool-diff-line { display: block; min-height: 1.6em; }
+.pd-tool-diff-line.add { color: var(--pd-accent); background: var(--pd-accent-soft); }
+.pd-tool-diff-line.del { color: var(--pd-danger); background: color-mix(in srgb, var(--pd-danger) 8%, transparent); }
+.pd-tool-diff-line.hunk { color: var(--pd-text-3); }
+@container (min-width: 1080px) {
+  .pd-tool-inspector { position: relative; flex: 0 0 42%; width: auto; max-width: 600px; box-shadow: none; }
+}
+@container (max-width: 520px) {
+  .pd-tool-row-text { flex-direction: column; gap: 1px; }
+  .pd-tool-target { max-width: 100%; }
+  .pd-tool-entry.is-command .pd-tool-row-title { display: none; }
+  .pd-tool-entry.is-command .pd-tool-target { color: var(--pd-text-2); }
+  .pd-tool-group-caption { font-size: 10px; }
+}

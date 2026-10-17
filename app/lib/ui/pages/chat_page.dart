@@ -26,6 +26,7 @@ import '../agents.dart';
 import '../chat/commands.dart';
 import '../chat/input_bar.dart';
 import '../chat/items.dart';
+import '../chat/tool_activity.dart';
 import '../chat/select_text_page.dart';
 import '../pick.dart';
 import '../share.dart';
@@ -65,7 +66,7 @@ class ChatPage extends StatefulWidget {
 }
 
 /** _Entry：列表中的一行（聊天项，以及是否在它前面显示时间） */
-typedef _Entry = ({ChatItem item, bool time, bool avatar});
+typedef _Entry = ({ChatItem item, bool time, bool avatar, List<ToolItem> tools});
 
 class _ChatPageState extends State<ChatPage> {
   HostScope? _scope;
@@ -924,7 +925,11 @@ class _ChatPageState extends State<ChatPage> {
       final time = it.at > 0 && it.at - lastAt > 5 * 60 * 1000;
       if (it.at > 0) lastAt = it.at;
       final agentSide = it is AgentItem || it is ThinkingItem || it is ToolItem || it is ApprovalItem || it is DiffItem || (it is FileItem && !it.up);
-      out.add((item: it, time: time, avatar: agentSide && (!lastAgent || time)));
+      if (!_selecting && it is ToolItem && !time && out.isNotEmpty && out.last.tools.isNotEmpty) {
+        out.last.tools.add(it);
+      } else {
+        out.add((item: it, time: time, avatar: agentSide && (!lastAgent || time), tools: it is ToolItem ? [it] : []));
+      }
       lastAgent = agentSide;
     }
     return out;
@@ -939,7 +944,13 @@ class _ChatPageState extends State<ChatPage> {
       final UserItem u => UserBubble(item: u),
       final AgentItem a => agent(AgentBubble(item: a)),
       final ThinkingItem t => agent(ThinkingBlock(item: t)),
-      final ToolItem t => agent(ToolCard(item: t)),
+      ToolItem() => agent(IgnorePointer(ignoring: _selecting, child: ToolActivity(
+          tools: e.tools,
+          root: _ws == null ? '' : '${_ws!.rootPath.replaceFirst(RegExp(r'/$'), '')}${s.cwd.isNotEmpty && s.cwd != '.' ? '/${s.cwd}' : ''}',
+          updates: _scope?.sessions,
+          lookupTool: (seq) => _log?.items.whereType<ToolItem>().where((tool) => tool.seq == seq).firstOrNull,
+          onLongPress: _selecting ? null : _itemMenu,
+        ))),
       final ApprovalItem a => agent(ApprovalCard(item: a, onDecide: (x) => _decide(a, x))),
       final DiffItem d => agent(DiffCard(item: d, onOpen: (f) => _openDiff(f, d.files))),
       final SystemItem m => SystemNote(item: m, onRetry: () => _api.retry(_id).catchError((Object _) {})),
@@ -947,7 +958,7 @@ class _ChatPageState extends State<ChatPage> {
     };
     final selectable = it is UserItem || it is AgentItem || it is ToolItem || it is ThinkingItem;
     Widget row = GestureDetector(
-      onLongPress: !_selecting ? (selectable ? () => _itemMenu(it) : (it is FileItem ? () => _fileMenu(it) : null)) : null,
+      onLongPress: !_selecting && it is! ToolItem ? (selectable ? () => _itemMenu(it) : (it is FileItem ? () => _fileMenu(it) : null)) : null,
       onTap: _selecting && selectable
           ? () => setState(() {
                 if (!_selected.remove(it)) _selected.add(it);
@@ -1082,6 +1093,11 @@ class _ChatPageState extends State<ChatPage> {
                   reverse: true,
                   padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                   itemCount: entries.length + 1,
+                  findChildIndexCallback: (key) {
+                    if (key is! ObjectKey) return null;
+                    final i = entries.indexWhere((e) => identical(e.item, key.value));
+                    return i < 0 ? null : entries.length - 1 - i;
+                  },
                   itemBuilder: (context, i) {
                     if (i == entries.length) {
                       return Padding(
