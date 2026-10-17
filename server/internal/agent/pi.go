@@ -53,7 +53,12 @@ func PiArgs(opt Options) []string {
 	args := append([]string{}, opt.Command...)
 	args = append(args, "--mode", "rpc")
 	if opt.Model != "" {
-		args = append(args, "--model", opt.Model)
+		// 显式传入供应商，避免 Pi 将 OpenAI/model 等大小写相近的名称匹配到内置 openai。
+		if provider, model, ok := strings.Cut(opt.Model, "/"); ok && provider != "" && model != "" {
+			args = append(args, "--provider", provider, "--model", model)
+		} else {
+			args = append(args, "--model", opt.Model)
+		}
 	}
 	if opt.ResumeID != "" {
 		args = append(args, "--session", opt.ResumeID)
@@ -275,7 +280,8 @@ func (p *piParser) parse(line []byte) []Event {
 				SessionFile string `json:"sessionFile"`
 				SessionID   string `json:"sessionId"`
 				Model       struct {
-					ID string `json:"id"`
+					ID       string `json:"id"`
+					Provider string `json:"provider"`
 				} `json:"model"`
 			}
 			if json.Unmarshal(l.Data, &st) == nil {
@@ -284,7 +290,11 @@ func (p *piParser) parse(line []byte) []Event {
 					sid = st.SessionID
 				}
 				if sid != "" {
-					return []Event{ev(EvSessionID, "id", sid, "model", st.Model.ID)}
+					model := st.Model.ID
+					if st.Model.Provider != "" && model != "" {
+						model = st.Model.Provider + "/" + model
+					}
+					return []Event{ev(EvSessionID, "id", sid, "model", model)}
 				}
 			}
 		}

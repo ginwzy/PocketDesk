@@ -15,41 +15,19 @@ import (
 	"time"
 )
 
-/** pathOnce：登录 shell 的 PATH 只取一次 */
-var (
-	pathOnce  sync.Once
-	extraPath string
-)
-
 /**
- * loginShellPath：读取登录 shell 的 PATH
- *
- * 处理流程：
- * 1、Windows 直接使用当前用户 PATH
- * 2、其他系统以登录交互方式执行 shell 输出 PATH，3 秒超时
+ * loginShellPath：使用与 Agent 子进程相同的登录交互环境，包含 ~/.zshrc 中初始化的 NVM 等工具路径。
  */
 func loginShellPath() string {
-	pathOnce.Do(func() {
-		// 1、Windows
-		if runtime.GOOS == "windows" {
-			return
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	for _, kv := range sysenv.Login() {
+		if path, ok := strings.CutPrefix(kv, "PATH="); ok {
+			return path
 		}
-		// 2、登录 shell
-		sh := os.Getenv("SHELL")
-		if sh == "" {
-			sh = "/bin/zsh"
-			if _, err := os.Stat(sh); err != nil {
-				sh = "/bin/sh"
-			}
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		out, err := exec.CommandContext(ctx, sh, "-l", "-c", "printf %s \"$PATH\"").Output()
-		if err == nil {
-			extraPath = strings.TrimSpace(string(out))
-		}
-	})
-	return extraPath
+	}
+	return ""
 }
 
 /** LookPath：先查当前 PATH，再查登录 shell 的 PATH 与常见安装位置 */
