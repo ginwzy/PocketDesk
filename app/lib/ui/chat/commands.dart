@@ -22,6 +22,7 @@ const slashCommands = [
   SlashCommand('/new', '在同一 Agent 和目录下开新会话', LucideIcons.messageSquarePlus300),
   SlashCommand('/stop', '打断当前执行', LucideIcons.circleStop300),
   SlashCommand('/model', '切换模型', LucideIcons.cpu300),
+  SlashCommand('/effort', '切换思考强度（Pi）', LucideIcons.cpu300),
   SlashCommand('/provider', '切换模型供应商（CC Switch）', LucideIcons.server300),
   SlashCommand('/skills', '查看、启用并选用 skill', LucideIcons.sparkles300),
   SlashCommand('/cd', '切换工作目录', LucideIcons.folderInput300),

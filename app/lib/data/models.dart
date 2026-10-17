@@ -261,6 +261,7 @@ class SessionInfo {
     this.autoApprove = false,
     this.muted = false,
     this.provider = '',
+    this.effort = '',
     this.instruction = '',
     this.preset = '',
   });
@@ -287,6 +288,9 @@ class SessionInfo {
   /** provider：本会话使用的模型供应商（CC Switch 中的供应商 ID），空为跟随电脑 */
   final String provider;
 
+  /** effort：Pi 会话的思考强度设置；default 为跟随 Pi 配置 */
+  final String effort;
+
   /** instruction：通讯录模板的系统提示词，每轮发送时放在用户输入前面 */
   final String instruction;
 
@@ -310,12 +314,13 @@ class SessionInfo {
         autoApprove: _b(j['autoApprove']),
         muted: _b(j['muted']),
         provider: _s(j['provider']),
+        effort: _s(j['effort']),
         instruction: _s(j['instruction']),
         preset: _s(j['preset']),
       );
 
   /** copyWith：复制并修改部分字段 */
-  SessionInfo copyWith({String? title, String? state, bool? pinned, String? preview, int? updatedAt, String? model, String? cwd, int? lastSeq, bool? muted}) =>
+  SessionInfo copyWith({String? title, String? state, bool? pinned, String? preview, int? updatedAt, String? model, String? cwd, int? lastSeq, bool? muted, String? effort}) =>
       SessionInfo(
         id: id,
         kind: kind,
@@ -332,6 +337,7 @@ class SessionInfo {
         autoApprove: autoApprove,
         muted: muted ?? this.muted,
         provider: provider,
+        effort: effort ?? this.effort,
         instruction: instruction,
         preset: preset,
       );
@@ -350,6 +356,23 @@ class SessionInfo {
 
   /** busy：是否正在执行 */
   bool get busy => state == SessionState.running || state == SessionState.awaiting;
+}
+
+/** EffortInfo：电脑端从 Pi 回读的强度、模型支持的档位与会话设置 */
+class EffortInfo {
+  const EffortInfo({required this.level, required this.levels, required this.override, required this.session});
+
+  final String level;
+  final List<String> levels;
+  final String override;
+  final SessionInfo session;
+
+  factory EffortInfo.fromJson(Map<String, dynamic> j) => EffortInfo(
+        level: _s(j['level']),
+        levels: _l(j['levels']).map((v) => _s(v)).toList(),
+        override: _s(j['override']),
+        session: SessionInfo.fromJson(_m(j['session'])),
+      );
 }
 
 /** PdEvent：会话事件或全局事件 */

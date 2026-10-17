@@ -91,6 +91,8 @@ class SessionSettingsPage extends StatelessWidget {
             if (s.isAgent)
               PdGroup(children: [
                 PdCell(title: '模型', value: s.model.isEmpty ? '默认' : s.model, onTap: () => switchModel(context, s)),
+                if (s.kind == 'pi')
+                  PdCell(title: '强度设置', value: s.effort == 'default' ? '跟随 Pi 配置' : s.effort.isEmpty ? '沿用 Pi 会话' : s.effort, onTap: () => switchEffort(context, s)),
                 if (supportsProvider(s))
                   FutureBuilder<String>(
                     key: ValueKey(s.provider),

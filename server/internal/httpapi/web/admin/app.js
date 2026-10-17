@@ -40,7 +40,7 @@
       return res.text().then(function (t) {
         var data = null;
         try { data = t ? JSON.parse(t) : null; } catch (e) { data = null; }
-        if (!res.ok) { var err = new Error((data && data.message) || '操作失败'); err.code = data && data.code; throw err; }
+        if (!res.ok) { var err = new Error((data && data.message) || '操作失败'); err.code = data && data.code; err.status = res.status; throw err; }
         return data;
       });
     });
@@ -1000,6 +1000,7 @@
     if (!s || !input) { return; }
     var text = input.value;
     if (!text.trim() && !pending.length) { return; }
+    if (isAgent(s) && /^\/effort(?:\s|$)/i.test(text.trim()) && pending.length) { toast('请先移除附件再使用 /effort'); return; }
     // 指令在电脑端执行（/compact 交给 Agent）
     var cmd = isAgent(s) && !pending.length ? /^\/(\S+)(?:\s|$)/.exec(text.trim()) : null;
     if (cmd && cmd[1] !== 'compact' && CMDS.some(function (c) { return c[0] === '/' + cmd[1].toLowerCase(); })) {
@@ -1007,7 +1008,7 @@
       saveDraft(s.id, '');
       syncSend();
       renderCmds();
-      runCmd('/' + cmd[1].toLowerCase());
+      runCmd('/' + cmd[1].toLowerCase(), text.trim().slice(cmd[0].length).trim());
       return;
     }
     input.value = '';
@@ -1103,6 +1104,7 @@
   /* ---------- 斜杠指令、模型与供应商、skill、接着电脑上的会话 ---------- */
   var CMDS = [
     ['/model', '切换模型', 'cpu'],
+    ['/effort', '切换思考强度（Pi）', 'cpu'],
     ['/provider', '切换模型供应商', 'server'],
     ['/skills', '查看、启用并选用 skill', 'sparkles'],
     ['/resume', '接着电脑上的会话聊', 'history'],
@@ -1126,7 +1128,7 @@
     var box = document.getElementById('cmds'), input = document.getElementById('input');
     var s = session(route().sid);
     if (!box || !input) { return; }
-    var list = s && isAgent(s) ? matchCmds(input.value) : [];
+    var list = s && isAgent(s) ? matchCmds(input.value).filter(function (c) { return c[0] !== '/effort' || s.kind === 'pi'; }) : [];
     if (!list.length) { box.innerHTML = ''; box.hidden = true; return; }
     cmdIndex = Math.min(cmdIndex, list.length - 1);
     box.hidden = false;
@@ -1148,11 +1150,12 @@
   }
 
   /** runCmd：执行指令 */
-  function runCmd(name) {
+  function runCmd(name, arg) {
     var s = session(route().sid);
     if (!s) { return; }
     switch (name) {
       case '/model': chooseModel(s); break;
+      case '/effort': chooseEffort(s, arg || ''); break;
       case '/provider': chooseProvider(s); break;
       case '/skills': skillsModal(s); break;
       case '/status': statusModal(s); break;
@@ -1162,7 +1165,7 @@
         api('POST', P + '/api/sessions/' + encodeURIComponent(s.id) + '/interrupt').then(function () { toast('已打断'); }).catch(function (er) { toast(er.message); });
         break;
       case '/new':
-        api('POST', P + '/api/sessions', { kind: s.kind, workspaceId: s.workspaceId, cwd: s.cwd, model: s.model }).then(function (s2) {
+        api('POST', P + '/api/sessions', { kind: s.kind, workspaceId: s.workspaceId, cwd: s.cwd, model: s.model, effort: s.effort || '' }).then(function (s2) {
           if (s.provider) { return api('PATCH', P + '/api/sessions/' + encodeURIComponent(s2.id), { provider: s.provider }); }
           return s2;
         }).then(function (s2) {
@@ -1189,7 +1192,7 @@
       ['状态', st],
       ['审批', s.autoApprove ? '免审批' : '需要确认'],
       ['提醒', s.muted ? '已关闭' : '已开启']
-    ]), '<button class="pd-btn pd-btn-primary" data-act="modal-close">好</button>');
+    ].concat(s.kind === 'pi' ? [['强度设置', s.effort === 'default' ? '跟随 Pi 配置' : (s.effort || '沿用 Pi 会话')]] : [])), '<button class="pd-btn pd-btn-primary" data-act="modal-close">好</button>');
   }
 
   /** usageModal：本会话累计用量（按已加载的记录统计） */
@@ -1229,6 +1232,43 @@
         '<div class="pd-field" style="margin-top:10px"><label for="model-custom">其他模型</label><input class="pd-input pd-mono" id="model-custom" placeholder="填写模型名称" value=""></div>',
         (s.model ? '<button class="pd-btn" data-act="model-pick" data-model="">恢复默认</button>' : '') + '<button class="pd-btn" data-act="modal-close">取消</button><button class="pd-btn pd-btn-primary" data-act="model-custom">使用</button>');
     }).catch(function (er) { toast(er.message); });
+  }
+
+  function effortRequest(method, s, level) {
+    return api(method, P + '/api/sessions/' + encodeURIComponent(s.id) + '/effort', method === 'PUT' ? { level: level } : undefined).catch(function (er) {
+      if ((er.status === 404 && !er.code) || er.status === 405) { er.message = '电脑端尚不支持 /effort，请更新电脑端'; }
+      throw er;
+    });
+  }
+
+  /** chooseEffort：由 Pi 提供档位；显示实际值，默认与关闭分别列出。 */
+  function chooseEffort(s, arg) {
+    if (!s || s.kind !== 'pi') { toast('/effort 当前仅支持 Pi 会话'); return; }
+    if (arg && arg.trim()) { setEffort(s, arg.trim().toLowerCase()); return; }
+    effortRequest('GET', s).then(function (info) {
+      Object.assign(s, info.session);
+      var setting = info.override === 'default' ? '跟随 Pi 配置' : (info.override || '沿用 Pi 会话');
+      var rows = [{ value: 'default', label: '跟随 Pi 配置', note: '清除本会话的强度覆盖', selected: info.override === 'default' }].concat((info.levels || []).map(function (v) {
+        return { value: v, label: v === 'off' ? 'off（关闭思考）' : v, note: v === info.level ? '当前实际生效' : '', selected: info.override !== 'default' && v === info.level };
+      }));
+      modal('思考强度', infoRows([['模型', info.model], ['实际强度', info.level], ['强度设置', setting]]) +
+        '<div class="pd-pick-list" id="effort-options">' + rows.map(function (r) {
+          return '<button class="pd-pick-row" data-act="effort-pick" data-sid="' + esc(s.id) + '" data-level="' + esc(r.value) + '">' + icon(r.selected ? 'check' : 'cpu', 16) +
+            '<span><span>' + esc(r.label) + '</span>' + (r.note ? '<span class="pd-muted" style="display:block;font-size:12px">' + esc(r.note) + '</span>' : '') + '</span></button>';
+        }).join('') + '</div>', '<button class="pd-btn" data-act="modal-close">取消</button>');
+    }).catch(function (er) { toast(er.message); });
+  }
+
+  var effortPending = {};
+  function setEffort(s, level) {
+    if (!s || effortPending[s.id]) { return; }
+    effortPending[s.id] = true;
+    effortRequest('PUT', s, level).then(function (info) {
+      Object.assign(s, info.session);
+      closeModal();
+      renderHead();
+      toast((level === 'default' ? '已跟随 Pi 配置，当前为 ' : '实际思考强度：') + info.level);
+    }).catch(function (er) { toast(er.message); }).finally(function () { delete effortPending[s.id]; });
   }
 
   /** chooseProvider：切换模型供应商（CC Switch 中的供应商，只影响这个会话） */
@@ -1936,15 +1976,19 @@
       case 'head-model':
         var rm = t.getBoundingClientRect(), sm = session(sid);
         var mopts = [['model', '切换模型', false, 'cpu']];
+        if (sm && sm.kind === 'pi') { mopts.push(['effort', '思考强度', false, 'cpu']); }
         if (sm && (sm.kind === 'claude' || sm.kind === 'codex')) { mopts.push(['provider', '模型供应商', false, 'server']); }
         popMenu(rm.right - 170, rm.bottom + 4, mopts).then(function (k) {
-          if (k === 'model') { chooseModel(sm); } else if (k === 'provider') { chooseProvider(sm); }
+          if (k === 'model') { chooseModel(sm); } else if (k === 'provider') { chooseProvider(sm); } else if (k === 'effort') { chooseEffort(sm); }
         });
         break;
       case 'head-skills': skillsModal(session(sid)); break;
       case 'head-mute':
         var su = session(sid);
         if (su) { patchSession(su, { muted: !su.muted }, su.muted ? '已打开提醒' : '已关闭提醒'); }
+        break;
+      case 'effort-pick':
+        setEffort(session(t.dataset.sid), t.dataset.level);
         break;
       case 'model-pick':
         closeModal();

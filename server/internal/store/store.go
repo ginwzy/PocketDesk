@@ -148,6 +148,7 @@ var columns = []struct{ table, name, def string }{
 	{"sessions", "log_offset", "INTEGER NOT NULL DEFAULT 0"},
 	{"sessions", "instruction", "TEXT NOT NULL DEFAULT ''"},
 	{"sessions", "preset", "TEXT NOT NULL DEFAULT ''"},
+	{"sessions", "effort", "TEXT NOT NULL DEFAULT ''"},
 }
 
 /**

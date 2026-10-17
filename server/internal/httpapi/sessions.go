@@ -41,6 +41,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		WorkspaceID    string `json:"workspaceId"`
 		Cwd            string `json:"cwd"`
 		Model          string `json:"model"`
+		Effort         string `json:"effort"`
 		AgentSessionID string `json:"agentSessionId"`
 		Cols           int    `json:"cols"`
 		Rows           int    `json:"rows"`
@@ -61,7 +62,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		sess, err = s.Terms.Create(r.Context(), terminal.Options{WorkspaceID: in.WorkspaceID, Cwd: in.Cwd, Cols: in.Cols, Rows: in.Rows, Command: in.Command})
 	} else {
 		// 2、Agent
-		sess, err = s.Sessions.CreateWith(r.Context(), session.NewSession{Kind: in.Kind, WorkspaceID: in.WorkspaceID, Cwd: in.Cwd, Model: in.Model, AutoApprove: in.AutoApprove, Instruction: in.Instruction, Preset: in.Preset})
+		sess, err = s.Sessions.CreateWith(r.Context(), session.NewSession{Kind: in.Kind, WorkspaceID: in.WorkspaceID, Cwd: in.Cwd, Model: in.Model, Effort: in.Effort, AutoApprove: in.AutoApprove, Instruction: in.Instruction, Preset: in.Preset})
 		if err == nil && in.Title != "" {
 			sess, err = s.Store.UpdateSession(r.Context(), sess.ID, store.SessionPatch{Title: &in.Title})
 		}

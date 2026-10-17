@@ -121,6 +121,8 @@ func (s *Server) deviceRoutes(mux *http.ServeMux, prefix string, a func(http.Han
 	h("POST /api/sessions", s.createSession)
 	h("GET /api/sessions/{id}", s.getSession)
 	h("PATCH /api/sessions/{id}", s.patchSession)
+	h("GET /api/sessions/{id}/effort", s.sessionEffort)
+	h("PUT /api/sessions/{id}/effort", s.sessionEffort)
 	h("DELETE /api/sessions/{id}", s.deleteSession)
 	h("GET /api/sessions/{id}/events", s.events)
 	h("POST /api/sessions/{id}/messages", s.sendMessage)

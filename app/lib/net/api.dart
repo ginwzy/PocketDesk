@@ -196,12 +196,13 @@ class PdApi {
 
   /** createSession：新建 Agent 或终端会话；通讯录模板会话带上标题、系统提示词与模板参数 */
   Future<SessionInfo> createSession(String kind, String ws, String cwd,
-      {String model = '', String agentSessionId = '', int cols = 0, int rows = 0, String command = '', bool autoApprove = false, String title = '', String instruction = '', String preset = ''}) async {
+      {String model = '', String effort = '', String agentSessionId = '', int cols = 0, int rows = 0, String command = '', bool autoApprove = false, String title = '', String instruction = '', String preset = ''}) async {
     final j = await json('POST', '/api/sessions', body: {
       'kind': kind,
       'workspaceId': ws,
       'cwd': cwd,
       if (model.isNotEmpty) 'model': model,
+      if (effort.isNotEmpty) 'effort': effort,
       if (agentSessionId.isNotEmpty) 'agentSessionId': agentSessionId,
       if (cols > 0) 'cols': cols,
       if (rows > 0) 'rows': rows,
@@ -227,6 +228,17 @@ class PdApi {
       'preset': ?preset,
     });
     return SessionInfo.fromJson(Json.map(j));
+  }
+
+  /** effort：查询或修改当前会话强度，兼容旧电脑端时明确提示更新 */
+  Future<EffortInfo> effort(String id, {String? level}) async {
+    try {
+      final j = await json(level == null ? 'GET' : 'PUT', '/api/sessions/$id/effort', body: level == null ? null : {'level': level}, wait: const Duration(seconds: 30));
+      return EffortInfo.fromJson(Json.map(j));
+    } on ApiException catch (e) {
+      if ((e.status == 404 && e.code == 'http_404') || e.status == 405) throw ApiException(e.status, 'effort_unavailable', '电脑端尚不支持 /effort，请更新电脑端');
+      rethrow;
+    }
   }
 
   /** closeTerminal：结束终端 */

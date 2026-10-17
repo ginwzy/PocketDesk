@@ -78,6 +78,7 @@ type Message struct {
 type Options struct {
 	Cwd      string
 	Model    string
+	Effort   string
 	ResumeID string
 	Approver Approver
 	Command  []string

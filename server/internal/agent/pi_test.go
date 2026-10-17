@@ -33,3 +33,16 @@ func TestPiStatePreservesProvider(t *testing.T) {
 		t.Fatalf("会话状态丢失供应商：%+v", evs)
 	}
 }
+
+func TestPiArgsEffort(t *testing.T) {
+	args := PiArgs(Options{Model: "OpenAI/vendor/model", Effort: "high", ResumeID: "session.jsonl"})
+	for _, pair := range [][]string{{"--provider", "OpenAI"}, {"--model", "vendor/model"}, {"--thinking", "high"}, {"--session", "session.jsonl"}} {
+		i := slices.Index(args, pair[0])
+		if i < 0 || i+1 >= len(args) || args[i+1] != pair[1] {
+			t.Fatalf("参数丢失或混淆：%q，期望 %q", args, pair)
+		}
+	}
+	if args := PiArgs(Options{Effort: "default"}); slices.Contains(args, "--thinking") {
+		t.Fatalf("default 应从 Pi 配置读取，不能作为 CLI 档位：%q", args)
+	}
+}

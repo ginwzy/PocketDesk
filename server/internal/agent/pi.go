@@ -63,6 +63,9 @@ func PiArgs(opt Options) []string {
 	if opt.ResumeID != "" {
 		args = append(args, "--session", opt.ResumeID)
 	}
+	if opt.Effort != "" && opt.Effort != "default" {
+		args = append(args, "--thinking", opt.Effort)
+	}
 	return args
 }
 
@@ -73,7 +76,7 @@ func PiArgs(opt Options) []string {
  * 1、启动 rpc 模式
  * 2、发送 get_state 取会话文件路径，用于续聊
  */
-func (PiDriver) Start(_ context.Context, opt Options) (Process, error) {
+func (PiDriver) Start(ctx context.Context, opt Options) (Process, error) {
 	if len(opt.Command) == 0 {
 		opt.Command = []string{"pi"}
 	}
@@ -97,7 +100,11 @@ func (PiDriver) Start(_ context.Context, opt Options) (Process, error) {
 		env = append(env, "POCKETDESK_SEND_CMD="+string(cmd), "POCKETDESK_SEND_DESC="+SendToolDesc, "POCKETDESK_SEND_PATHS_DESC="+SendPathsDesc)
 	}
 	parser := &piParser{}
+	proc := &piProc{opt: opt, pending: map[string]chan piResponse{}}
 	p, err := startLineProc(args, opt.Cwd, env, func(lp *lineProc, line []byte) {
+		if proc.resolve(line) {
+			return
+		}
 		if bytes.Contains(line, []byte(`"extension_ui_request"`)) {
 			piUIRequest(lp, opt.Approver, line)
 			return
@@ -109,9 +116,16 @@ func (PiDriver) Start(_ context.Context, opt Options) (Process, error) {
 	if err != nil {
 		return nil, err
 	}
+	proc.lineProc = p
+	if opt.Effort == "default" {
+		if _, err := proc.SetEffort(ctx, "default"); err != nil {
+			p.Close()
+			return nil, err
+		}
+	}
 	// 2、会话信息
 	p.writeJSON(map[string]any{"type": "get_state"})
-	return &piProc{lineProc: p}, nil
+	return proc, nil
 }
 
 /**
@@ -154,9 +168,6 @@ func piUIRequest(lp *lineProc, ap Approver, line []byte) {
 	// 3、其他对话
 	lp.writeJSON(map[string]any{"type": "extension_ui_response", "id": r.ID, "cancelled": true})
 }
-
-/** piProc：Pi 进程 */
-type piProc struct{ *lineProc }
 
 /** Send：发送提示词 */
 func (p *piProc) Send(_ context.Context, m Message) error {

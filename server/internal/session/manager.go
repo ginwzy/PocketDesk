@@ -8,12 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"github.com/ewkzcz/pocketdesk/server/internal/idem"
 	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -169,6 +169,16 @@ func (m *Manager) Recover(ctx context.Context) error {
 		return err
 	}
 	for _, s := range list {
+		if s.Kind == agent.KindPi {
+			if model, effort := agent.SplitPiEffort(s.Model); effort != "" {
+				if s.Effort != "" {
+					effort = s.Effort
+				}
+				if _, err := m.d.Store.UpdateSession(ctx, s.ID, store.SessionPatch{Model: &model, Effort: &effort}); err != nil {
+					return err
+				}
+			}
+		}
 		if s.Kind == KindTerminal {
 			continue
 		}
@@ -203,6 +213,7 @@ type NewSession struct {
 	WorkspaceID string
 	Cwd         string
 	Model       string
+	Effort      string
 	// AutoApprove：免审批会话
 	AutoApprove bool
 	// Instruction、Preset：通讯录模板的系统提示词与模板标识参数
@@ -213,6 +224,15 @@ type NewSession struct {
 /** CreateWith：按参数新建会话 */
 func (m *Manager) CreateWith(ctx context.Context, n NewSession) (store.Session, error) {
 	kind, wsID, cwd, model := n.Kind, n.WorkspaceID, n.Cwd, n.Model
+	if kind == agent.KindPi {
+		base, legacy := agent.SplitPiEffort(model)
+		model = base
+		if n.Effort == "" {
+			n.Effort = legacy
+		}
+	} else if n.Effort != "" {
+		return store.Session{}, agent.ErrUnsupported
+	}
 	// 1、开关与类型
 	if !m.d.Config().Features.Agents {
 		return store.Session{}, ErrDisabled
@@ -226,7 +246,7 @@ func (m *Manager) CreateWith(ctx context.Context, n NewSession) (store.Session, 
 		return store.Session{}, err
 	}
 	// 3、写库
-	s, err := m.d.Store.CreateSession(ctx, store.Session{ID: security.NewID(), Kind: kind, Title: agent.Label(kind), WorkspaceID: wsID, Cwd: rel, Model: model, State: StateIdle, AutoApprove: n.AutoApprove, Instruction: n.Instruction, Preset: n.Preset})
+	s, err := m.d.Store.CreateSession(ctx, store.Session{ID: security.NewID(), Kind: kind, Title: agent.Label(kind), WorkspaceID: wsID, Cwd: rel, Model: model, Effort: n.Effort, State: StateIdle, AutoApprove: n.AutoApprove, Instruction: n.Instruction, Preset: n.Preset})
 	if err != nil {
 		return s, err
 	}
@@ -410,6 +430,7 @@ func (m *Manager) startProc(ctx context.Context, rt *runtime, kind, cwd, resume,
 	}
 	cfg := m.d.Config()
 	opt := agent.Options{Cwd: cwd, Model: model, ResumeID: resume, Command: cfg.Agents[kind], Approver: &sessionApprover{m: m, sid: rt.id, auto: rt.sess.AutoApprove}, AutoApprove: rt.sess.AutoApprove}
+	opt.Effort = rt.sess.Effort
 	if pid := rt.sess.Provider; pid != "" {
 		if m.d.Providers == nil {
 			return nil, errors.New("电脑上没有可用的模型供应商")
@@ -815,6 +836,13 @@ func (m *Manager) Update(ctx context.Context, id string, p Patch) (store.Session
 	}
 	// 1、目录
 	sp := store.SessionPatch{Title: p.Title, Pinned: p.Pinned, Model: p.Model, Muted: p.Muted, Provider: p.Provider, Instruction: p.Instruction, Preset: p.Preset}
+	if cur.Kind == agent.KindPi && p.Model != nil {
+		model, effort := agent.SplitPiEffort(*p.Model)
+		sp.Model = &model
+		if effort != "" {
+			sp.Effort = &effort
+		}
+	}
 	var providerName string
 	if p.Provider != nil && *p.Provider != cur.Provider {
 		// 换供应商后原来的模型多半不可用，未同时指定模型时改用供应商默认模型

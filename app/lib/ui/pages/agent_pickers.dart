@@ -76,9 +76,41 @@ Future<void> switchModel(BuildContext context, SessionInfo s) async {
   if (n != null && context.mounted) toast(context, model.isEmpty ? '已恢复默认模型' : '已切换到 $model');
 }
 
-/**
- * switchProvider：切换模型供应商（只对这个会话生效）
- */
+/** switchEffort：从 Pi 查询可用档位，修改后显示实际值 */
+Future<void> switchEffort(BuildContext context, SessionInfo s, {String arg = ''}) async {
+  if (s.kind != 'pi') {
+    toast(context, '/effort 当前仅支持 Pi 会话');
+    return;
+  }
+  final scope = context.read<AppState>().scope;
+  if (scope == null) return;
+  try {
+    String? level = arg.trim().isEmpty ? null : arg.trim().toLowerCase();
+    if (level == null) {
+      final info = await scope.conn.api.effort(s.id);
+      scope.sessions.upsert(info.session);
+      if (!context.mounted) return;
+      final options = ['default', ...info.levels];
+      final i = await actionSheet(context, [
+        SheetAction('跟随 Pi 配置', icon: info.override == 'default' ? LucideIcons.check300 : null, subtitle: '清除本会话的强度覆盖'),
+        for (final value in info.levels)
+          SheetAction(value == 'off' ? 'off（关闭思考）' : value, icon: info.override != 'default' && value == info.level ? LucideIcons.check300 : null, subtitle: value == info.level ? '当前实际生效' : ''),
+      ], title: '思考强度 · 当前 ${info.level}');
+      if (i == null || !context.mounted) return;
+      level = options[i];
+    }
+    final info = await scope.conn.api.effort(s.id, level: level);
+    scope.sessions.upsert(info.session);
+    if (context.mounted) {
+      final prefix = level == 'default' ? '已跟随 Pi 配置，当前为 ' : '实际思考强度：';
+      toast(context, '$prefix${info.level}');
+    }
+  } on ApiException catch (e) {
+    if (context.mounted) toast(context, e.message);
+  }
+}
+
+/** switchProvider：切换模型供应商（只对这个会话生效） */
 Future<void> switchProvider(BuildContext context, SessionInfo s) async {
   final api = context.read<AppState>().scope?.conn.api;
   if (api == null) return;

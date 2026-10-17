@@ -287,6 +287,10 @@ class _ChatPageState extends State<ChatPage> {
     if (s == null || _sending) return;
     var text = _input.text.trim();
     if (text.isEmpty && _pending.isEmpty) return;
+    if (s.isAgent && RegExp(r'^/effort(?:\s|$)', caseSensitive: false).hasMatch(text) && _pending.isNotEmpty) {
+      toast(context, '请先移除附件再使用 /effort');
+      return;
+    }
     // 1、指令
     if (s.isAgent && text.startsWith('/') && _pending.isEmpty) {
       final name = text.split(RegExp(r'\s')).first.toLowerCase();
@@ -359,6 +363,8 @@ class _ChatPageState extends State<ChatPage> {
           await _openDiff(null, const []);
         case '/model':
           await switchModel(context, s);
+        case '/effort':
+          await switchEffort(context, s, arg: arg);
         case '/provider':
           await switchProvider(context, s);
         case '/skills':
@@ -366,7 +372,7 @@ class _ChatPageState extends State<ChatPage> {
         case '/cd':
           await _changeDir();
         case '/new':
-          final n = await _api.createSession(s.kind, s.workspaceId, s.cwd, model: s.model);
+          final n = await _api.createSession(s.kind, s.workspaceId, s.cwd, model: s.model, effort: s.effort);
           _scope!.sessions.upsert(n);
           if (mounted) await Navigator.of(context).pushReplacement(MaterialPageRoute<void>(builder: (_) => ChatPage(sessionId: n.id)));
         case '/resume':
@@ -375,6 +381,7 @@ class _ChatPageState extends State<ChatPage> {
           await _showInfo('会话状态', [
             ('Agent', agentFor(s.kind).label),
             ('模型', s.model.isEmpty ? '默认' : s.model),
+            if (s.kind == 'pi') ('强度设置', s.effort == 'default' ? '跟随 Pi 配置' : s.effort.isEmpty ? '沿用 Pi 会话' : s.effort),
             ('供应商', s.provider.isEmpty ? '跟随电脑设置' : s.provider),
             ('工作目录', s.cwd.isEmpty ? '工作区根目录' : s.cwd),
             ('状态', _stateLabel(s.state)),
@@ -441,6 +448,13 @@ class _ChatPageState extends State<ChatPage> {
 
   /** _modelMenu：模型与供应商 */
   Future<void> _modelMenu(SessionInfo s) async {
+    if (s.kind == 'pi') {
+      final i = await actionSheet(context, const [SheetAction('切换模型', icon: LucideIcons.cpu300), SheetAction('思考强度', icon: LucideIcons.cpu300)]);
+      if (!mounted) return;
+      if (i == 0) await switchModel(context, s);
+      if (i == 1 && mounted) await switchEffort(context, s);
+      return;
+    }
     if (!supportsProvider(s)) return switchModel(context, s);
     final i = await actionSheet(context, const [SheetAction('切换模型', icon: LucideIcons.cpu300), SheetAction('模型供应商', icon: LucideIcons.server300)]);
     if (!mounted) return;
@@ -1026,7 +1040,7 @@ class _ChatPageState extends State<ChatPage> {
       return Scaffold(appBar: const PdBar(title: ''), body: Center(child: CircularProgressIndicator(color: c.accent)));
     }
     final entries = _entries(log);
-    final cmds = s.isAgent ? matchCommands(_input.text) : const <SlashCommand>[];
+    final cmds = s.isAgent ? matchCommands(_input.text).where((c) => c.name != '/effort' || s.kind == 'pi').toList() : const <SlashCommand>[];
     return PopScope(
       canPop: !_selecting,
       onPopInvokedWithResult: (did, _) {
@@ -1149,6 +1163,10 @@ class _ChatPageState extends State<ChatPage> {
                   QuickChip(label: '/diff 查看改动', onTap: () => _runCommand('/diff', '')),
                   const SizedBox(width: 8),
                   QuickChip(label: '/model 切换模型', onTap: () => _runCommand('/model', '')),
+                  if (s.kind == 'pi') ...[
+                    const SizedBox(width: 8),
+                    QuickChip(label: '/effort 思考强度', onTap: () => _runCommand('/effort', '')),
+                  ],
                   if (supportsProvider(s)) ...[
                     const SizedBox(width: 8),
                     QuickChip(label: '/skills 选用 skill', onTap: () => _runCommand('/skills', '')),
