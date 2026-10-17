@@ -66,9 +66,9 @@ class _SessionsPageState extends State<SessionsPage> {
         ('接着电脑上的会话', LucideIcons.history300, () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const ExternalSessionsPage()))),
       if (scope != null && (status?.features.agents ?? true))
         for (final k in installed) ('新建 ${agentFor(k).label} 会话', LucideIcons.messageSquarePlus300, () => newAgentSession(context, k)),
-      // 免审批：Claude Code 跳过全部权限确认，Codex 不审批也不进沙箱
+      // 免审批：Claude Code 跳过权限确认，Codex 不审批不进沙箱，Pi 自动执行工具
       if (scope != null && (status?.features.agents ?? true))
-        for (final k in installed.where((k) => k == 'claude' || k == 'codex')) ('${agentFor(k).label} 免审批', LucideIcons.zap300, () => newAgentSession(context, k, autoApprove: true)),
+        for (final k in installed.where((k) => k == 'claude' || k == 'codex' || k == 'pi')) ('${agentFor(k).label} 免审批', LucideIcons.zap300, () => newAgentSession(context, k, autoApprove: true)),
       // 2、终端、截屏与扫码；终端没开启时点进去会提示去电脑端开启
       if (scope != null) ('新建终端', LucideIcons.terminal300, () => newTerminal(context)),
       if (scope != null) ('截取电脑屏幕', LucideIcons.monitor300, _screenshot),

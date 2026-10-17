@@ -371,7 +371,7 @@
     var h = c.host(), info = (h && h.agents || []).filter(function (x) { return x.kind === kind; })[0];
     var installed = !info || info.installed;
     var ss = c.sessions().filter(function (s) { return s.kind === kind && !s.preset; }).sort(function (a, b) { return (b.updatedAt || 0) - (a.updatedAt || 0); });
-    var auto = kind === 'claude' || kind === 'codex';
+    var auto = kind === 'claude' || kind === 'codex' || kind === 'pi';
     return head(agentName(kind), '') + '<div class="pd-page"><div class="pd-page-inner">' +
       '<div class="pd-hero"><button class="pd-avatar-btn pd-avatar-big" data-act="av-open" data-key="' + kind + '" data-title="设置' + esc(agentName(kind)) + ' 的头像" aria-label="更换头像">' + (X.avatarHtml(kind) || '') + '</button>' +
       '<div><div class="pd-hero-name">' + esc(agentName(kind)) + '</div><div class="pd-hero-state" style="' + (installed ? '' : 'color:var(--pd-text-3)') + '"><i style="' + (installed ? '' : 'background:var(--pd-text-4)') + '"></i>' + (installed ? esc((info && info.version) || '电脑上已安装') : '电脑上未安装') + '</div></div></div>' +
@@ -702,7 +702,7 @@
     var kinds = installedKinds();
     var items = [['assistant', '新建文件传输助手', false, 'send'], ['resume', '接着电脑上的会话', false, 'history'], '-', '#新建会话'];
     kinds.forEach(function (k) { items.push(['new:' + k, '新建 ' + agentName(k) + ' 会话', false, 'message-square-plus']); });
-    kinds.filter(function (k) { return k === 'claude' || k === 'codex'; }).forEach(function (k) { items.push(['auto:' + k, agentName(k) + ' 免审批', false, 'zap']); });
+    kinds.filter(function (k) { return k === 'claude' || k === 'codex' || k === 'pi'; }).forEach(function (k) { items.push(['auto:' + k, agentName(k) + ' 免审批', false, 'zap']); });
     var subs = allPresets().map(function (t) { return ['preset:' + t.id, t.name, false, ICONS[t.icon] || 'sparkles']; });
     subs.push(['presets', '全部预设助手…', false, 'users-round']);
     items.push(['terminal', '新建终端', false, 'terminal'], ['sub', '预设助手', false, 'users-round', subs], '-', ['screenshot', '截取电脑屏幕发到手机', false, 'monitor'], ['pair', '配对新手机', false, 'qr-code']);

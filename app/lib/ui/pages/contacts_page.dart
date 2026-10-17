@@ -107,7 +107,7 @@ class ContactPage extends StatelessWidget {
     final scope = app.scope;
     final a = agentFor(kind);
     final info = scope?.conn.status?.agents.where((x) => x.kind == kind).firstOrNull;
-    final supportsAuto = kind == 'claude' || kind == 'codex';
+    final supportsAuto = kind == 'claude' || kind == 'codex' || kind == 'pi';
     final recent = scope?.sessions.sessions.where((s) => s.kind == kind && !s.isPreset).firstOrNull;
     final installed = info?.installed ?? true;
     return Scaffold(

@@ -66,6 +66,8 @@ AI 编程工具一直在电脑上运行，读写的也是电脑上的文件；�
 
 Pi 会话在手机和电脑上都可以输入 `/effort` 选择思考强度，或直接输入 `/effort high`；`/effort default` 恢复跟随 Pi 配置。选单只展示当前模型支持的档位，并显示实际生效值。设置只影响当前会话，会在两端同步并在重启后保留；正在生成、等待审批或处于中断状态时，请先结束当前轮再修改。需要电脑端 Pi 支持思考强度 RPC 接口。
 
+需要 Pi 自动执行命令和文件操作时，在聊天列表「+」中选择「Pi 免审批」，或在通讯录的 Pi 页面新建「免审批会话」。手机和电脑均支持这个入口；会话显示「免审批」标记，在其中使用 `/new` 也会保留免审批模式。
+
 <img src="assets/phone-chat-panel.webp" width="240" alt="聊天输入面板"> <img src="assets/phone-chat-slash.webp" width="240" alt="斜杠指令"> <img src="assets/phone-diff.webp" width="240" alt="逐行差异">
 
 每个会话可以单独设置名称、提醒、模型、供应商、Skills 和工作目录。

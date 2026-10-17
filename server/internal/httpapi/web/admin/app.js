@@ -1165,7 +1165,7 @@
         api('POST', P + '/api/sessions/' + encodeURIComponent(s.id) + '/interrupt').then(function () { toast('已打断'); }).catch(function (er) { toast(er.message); });
         break;
       case '/new':
-        api('POST', P + '/api/sessions', { kind: s.kind, workspaceId: s.workspaceId, cwd: s.cwd, model: s.model, effort: s.effort || '' }).then(function (s2) {
+        api('POST', P + '/api/sessions', { kind: s.kind, workspaceId: s.workspaceId, cwd: s.cwd, model: s.model, effort: s.effort || '', autoApprove: s.kind === 'pi' && !!s.autoApprove }).then(function (s2) {
           if (s.provider) { return api('PATCH', P + '/api/sessions/' + encodeURIComponent(s2.id), { provider: s.provider }); }
           return s2;
         }).then(function (s2) {
@@ -2049,7 +2049,7 @@
         var opts = recent.map(function (s) { return ['open:' + s.id, title(s), false, 'message-circle']; });
         if (opts.length) { opts.push('-'); }
         opts.push(['new', '新建 ' + AGENT[kind] + ' 会话', false, 'plus']);
-        if (kind === 'claude' || kind === 'codex') { opts.push(['auto', AGENT[kind] + ' 免审批', false, 'shield-alert']); }
+        if (kind === 'claude' || kind === 'codex' || kind === 'pi') { opts.push(['auto', AGENT[kind] + ' 免审批', false, 'shield-alert']); }
         popMenu(ra.left, ra.bottom + 4, opts).then(function (k) {
           if (!k) { return; }
           if (k.indexOf('open:') === 0) { unhideSession(k.slice(5)); location.hash = 'chat/' + encodeURIComponent(k.slice(5)); return; }

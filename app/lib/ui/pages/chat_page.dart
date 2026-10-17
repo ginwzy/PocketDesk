@@ -372,7 +372,7 @@ class _ChatPageState extends State<ChatPage> {
         case '/cd':
           await _changeDir();
         case '/new':
-          final n = await _api.createSession(s.kind, s.workspaceId, s.cwd, model: s.model, effort: s.effort);
+          final n = await _api.createSession(s.kind, s.workspaceId, s.cwd, model: s.model, effort: s.effort, autoApprove: s.kind == 'pi' && s.autoApprove);
           _scope!.sessions.upsert(n);
           if (mounted) await Navigator.of(context).pushReplacement(MaterialPageRoute<void>(builder: (_) => ChatPage(sessionId: n.id)));
         case '/resume':
