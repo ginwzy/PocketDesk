@@ -557,6 +557,14 @@
           add(null, Object.assign(base, { t: 'sys', text: d.message, error: true, retryable: !!d.retryable }));
           break;
         case 'system':
+          if (d.text === '已打断' || d.text === '电脑端服务已重启，会话已恢复') {
+            items.forEach(function (it) { if (it.t === 'user' && it.queued) { it.queued = false; it.cancelled = true; } });
+          } else if (d.text === '开始处理排队消息') {
+            Object.keys(by).forEach(function (k) { if (k.indexOf('m:') === 0 || k.indexOf('t:') === 0) { delete by[k]; } });
+            for (var qi = 0; qi < items.length; qi++) {
+              if (items[qi].t === 'user' && items[qi].queued) { items[qi].queued = false; break; }
+            }
+          }
           if (d.text) { add(null, Object.assign(base, { t: 'sys', text: d.text })); }
           break;
         case 'file':
@@ -918,7 +926,7 @@
         body = '<div class="pd-bubble plain">' + esc(it.text) + '</div>' +
           (it.attachments.length ? '<div class="pd-attach">' + it.attachments.map(function (a) { return '<span>' + esc(a.split('/').pop()) + '</span>'; }).join('') + '</div>' : '') +
           (it.skills && it.skills.length ? '<div class="pd-attach">' + it.skills.map(function (k) { return '<span>' + icon('sparkles', 12) + esc(k) + '</span>'; }).join('') + '</div>' : '') +
-          (it.queued ? '<div class="pd-queued">排队中，Agent 空闲后发送</div>' : '');
+          (it.cancelled ? '<div class="pd-queued">已取消</div>' : it.queued ? '<div class="pd-queued">排队中，Agent 空闲后发送</div>' : '');
         who = mine ? 'host' : 'phone';
         break;
       case 'host':

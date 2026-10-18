@@ -81,6 +81,60 @@ void main() {
     expect(log.items.last, isA<SystemItem>());
   });
 
+  test('打断取消旧队列，打断后发送的新消息可以继续处理', () {
+    final log = ChatLog('s');
+    final events = [
+      e(1, 'msg.user', {'text': '旧消息', 'queued': true}),
+      e(2, 'state', {'state': 'interrupted'}),
+      e(3, 'system', {'text': '已打断'}),
+      e(4, 'msg.user', {'text': '继续', 'queued': true}),
+      e(5, 'state', {'state': 'idle'}),
+      e(6, 'system', {'text': '开始处理排队消息'}),
+    ];
+    for (final event in events) {
+      log.apply(event);
+    }
+    void check() {
+      final users = log.items.whereType<UserItem>().toList();
+      expect(users[0].queued, isFalse);
+      expect(users[0].cancelled, isTrue);
+      expect(users[1].queued, isFalse);
+      expect(users[1].cancelled, isFalse);
+    }
+    check();
+    log.reset(events);
+    check();
+  });
+
+  test('向前加载的队列消息也应用后续取消和开始事件', () {
+    final log = ChatLog('s');
+    log.apply(e(3, 'system', {'text': '已打断'}));
+    log.apply(e(4, 'msg.user', {'text': '继续', 'queued': true}));
+    log.apply(e(5, 'system', {'text': '开始处理排队消息'}));
+    log.prepend([
+      e(1, 'msg.user', {'text': '旧消息一', 'queued': true}),
+      e(2, 'msg.user', {'text': '旧消息二', 'queued': true}),
+    ]);
+    final users = log.items.whereType<UserItem>().toList();
+    expect(users.map((it) => it.queued), [false, false, false]);
+    expect(users.map((it) => it.cancelled), [true, true, false]);
+  });
+
+  test('排队开始时重置回复编号，服务重启时取消剩余队列', () {
+    final log = ChatLog('s');
+    log.apply(e(1, 'msg.done', {'id': 'pi-0', 'text': '之前的回复'}));
+    log.apply(e(2, 'msg.user', {'text': '继续', 'queued': true}));
+    log.apply(e(3, 'msg.user', {'text': '剩余', 'queued': true}));
+    log.apply(e(4, 'system', {'text': '开始处理排队消息'}));
+    log.apply(e(5, 'msg.done', {'id': 'pi-0', 'text': '新的回复'}));
+    log.apply(e(6, 'system', {'text': '电脑端服务已重启，会话已恢复'}));
+    expect(log.items.whereType<AgentItem>().map((it) => it.text), ['之前的回复', '新的回复']);
+    final users = log.items.whereType<UserItem>().toList();
+    expect(users[0].cancelled, isFalse);
+    expect(users[1].queued, isFalse);
+    expect(users[1].cancelled, isTrue);
+  });
+
   test('状态、模型、用量、错误、改动与文件消息', () {
     final log = ChatLog('s');
     log.apply(e(1, 'state', {'state': 'running'}));

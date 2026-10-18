@@ -3,15 +3,22 @@
 # 打包 macOS 桌面应用 PocketDesk.app（同时支持 Intel 与 Apple 芯片），产物放到 server/dist/
 #
 # 用法：scripts/package-mac.sh [--install]
-#   --install  打包后安装到「应用程序」文件夹，正在运行的旧版本会先退出
+#   --install  打包后安排后台安装并重启服务，失败时自动回退
+# 环境变量：PD_BUILD_NUMBER 指定构建号；SDKROOT 可指定与编译器匹配的 macOS SDK。
 # 应用图标由 App 的 1024 图标生成；版本号取 app/pubspec.yaml。
 set -euo pipefail
+
+# 使用与当前 Xcode 匹配的 SDK，避免命令行工具与 Xcode 的 SDK 混用。
+export SDKROOT="${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}"
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.3}"
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 server="$root/server"
 dist="$server/dist"
 app="$dist/PocketDesk.app"
 version="$(sed -n 's/^version: *\([0-9.]*\).*/\1/p' "$root/app/pubspec.yaml")"
+build="${PD_BUILD_NUMBER:-$(date +%s)}"
+release="$version+$build"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -19,7 +26,7 @@ trap 'rm -rf "$work"' EXIT
 cd "$server"
 for arch in arm64 amd64; do
   cc="clang -arch $([ "$arch" = amd64 ] && echo x86_64 || echo arm64)"
-  CGO_ENABLED=1 GOOS=darwin GOARCH=$arch CC="$cc" go build -trimpath -ldflags "-s -w -X main.version=$version" -o "$work/pocketdesk-$arch" ./cmd/pocketdesk
+  CGO_ENABLED=1 GOOS=darwin GOARCH=$arch CC="$cc" go build -trimpath -ldflags "-s -w -X main.version=$release" -o "$work/pocketdesk-$arch" ./cmd/pocketdesk
 done
 
 # 2、应用目录结构与信息
@@ -38,7 +45,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 	<key>CFBundleIconFile</key><string>AppIcon</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>$version</string>
-	<key>CFBundleVersion</key><string>$version</string>
+	<key>CFBundleVersion</key><string>$build</string>
 	<key>LSMinimumSystemVersion</key><string>12.3</string>
 	<key>NSHighResolutionCapable</key><true/>
 	<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
@@ -59,13 +66,9 @@ iconutil -c icns "$set_dir" -o "$app/Contents/Resources/AppIcon.icns"
 # 4、本机签名（未上架分发时系统要求至少有本地签名才能运行）
 # 指定按应用标识识别：每次重新打包后，系统仍认得这是同一个应用，已允许的「屏幕录制」等权限不会失效
 codesign --force --deep -s - -r='designated => identifier "com.pocketdesk.desktop"' "$app"
-echo "已打包：${app}（版本 ${version}）"
+echo "已打包：${app}（版本 ${release}）"
 
-# 5、安装
+# 5、交给独立后台任务安装，避免服务退出时连带终止安装脚本
 if [ "${1:-}" = "--install" ]; then
-  pkill -f "/Applications/PocketDesk.app/Contents/MacOS/pocketdesk" 2>/dev/null || true
-  sleep 1
-  rm -rf "/Applications/PocketDesk.app"
-  cp -R "$app" "/Applications/PocketDesk.app"
-  echo "已安装：/Applications/PocketDesk.app"
+  python3 "$root/scripts/install-mac.py" --app "$app" --background --delay 60
 fi

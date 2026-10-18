@@ -263,6 +263,21 @@ func (s *Store) EventsAfter(ctx context.Context, sessionID string, after int64, 
 	return out, rows.Err()
 }
 
+/** HasQueuedMessages：最后一次取消后，是否还有未开始处理的排队消息 */
+func (s *Store) HasQueuedMessages(ctx context.Context, sessionID string) (bool, error) {
+	var pending int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(CASE
+			WHEN type='msg.user' AND json_extract(data,'$.queued')=1 THEN 1
+			WHEN type='system' AND json_extract(data,'$.text')='开始处理排队消息' THEN -1
+			ELSE 0 END),0)
+		FROM events WHERE session_id=? AND seq>COALESCE((
+			SELECT MAX(seq) FROM events WHERE session_id=? AND type='system'
+			AND json_extract(data,'$.text') IN ('已打断','电脑端服务已重启，会话已恢复')
+		),0)`, sessionID, sessionID).Scan(&pending)
+	return pending > 0, err
+}
+
 /** EventsBefore：取某序号之前最近的 limit 条事件（升序返回），用于上滑加载 */
 func (s *Store) EventsBefore(ctx context.Context, sessionID string, before int64, limit int) ([]Event, error) {
 	if limit <= 0 || limit > 2000 {

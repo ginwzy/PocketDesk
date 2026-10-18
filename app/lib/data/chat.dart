@@ -18,11 +18,13 @@ sealed class ChatItem {
 
 /** UserItem：我发出的消息 */
 class UserItem extends ChatItem {
-  UserItem(super.seq, super.at, {required this.text, this.attachments = const [], this.queued = false, this.fileName = '', this.skills = const []});
+  UserItem(super.seq, super.at, {required this.text, this.attachments = const [], this.queued = false, this.cancelled = false, this.fileName = '', this.skills = const []}) : _wasQueued = queued;
 
   final String text;
   final List<String> attachments;
   bool queued;
+  bool cancelled;
+  final bool _wasQueued;
   final String fileName;
 
   /** skills：这条消息使用的 skill */
@@ -171,6 +173,7 @@ class ChatLog {
       rebuilt._merge(e, append: true);
     }
     items.insertAll(0, rebuilt.items);
+    _syncQueue();
     rebuilt._byKey.forEach((k, v) => _byKey.putIfAbsent(k, () => v));
     firstSeq = fresh.first.seq;
     if (lastSeq == 0) lastSeq = fresh.last.seq;
@@ -197,6 +200,28 @@ class ChatLog {
 
   /** pendingApprovals：未处理的审批数 */
   int get pendingApprovals => items.whereType<ApprovalItem>().where((a) => a.status == ApprovalStatus.pending).length;
+
+  /** _syncQueue：按事件顺序恢复队列状态，向前加载的消息也应用后续的开始与取消事件 */
+  void _syncQueue() {
+    final pending = <UserItem>[];
+    for (final it in items) {
+      if (it is UserItem && it._wasQueued) {
+        it.queued = true;
+        it.cancelled = false;
+        pending.add(it);
+      } else if (it is SystemItem) {
+        if (it.text == '已打断' || it.text == '电脑端服务已重启，会话已恢复') {
+          for (final user in pending) {
+            user.queued = false;
+            user.cancelled = true;
+          }
+          pending.clear();
+        } else if (it.text == '开始处理排队消息' && pending.isNotEmpty) {
+          pending.removeAt(0).queued = false;
+        }
+      }
+    }
+  }
 
   /** _merge：按类型合并 */
   void _merge(PdEvent e, {required bool append}) {
@@ -288,14 +313,10 @@ class ChatLog {
       case 'system':
         final text = str('text');
         if (text == '开始处理排队消息') {
-          for (final it in items.whereType<UserItem>()) {
-            if (it.queued) {
-              it.queued = false;
-              break;
-            }
-          }
+          _byKey.removeWhere((k, _) => k.startsWith('m:') || k.startsWith('t:'));
         }
         add(null, SystemItem(e.seq, e.createdAt, text: text));
+        if (text == '已打断' || text == '电脑端服务已重启，会话已恢复' || text == '开始处理排队消息') _syncQueue();
       case 'file':
         add(null, FileItem(e.seq, e.createdAt,
             up: str('direction') == 'up',

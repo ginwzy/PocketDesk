@@ -161,7 +161,7 @@ func (m *Manager) SetTimeouts(approval, grace time.Duration) {
 }
 
 /**
- * Recover：服务启动时把上次未正常结束的会话状态复位为空闲，并把遗留审批标为过期
+ * Recover：服务启动时复位未正常结束的会话、清理遗留排队，并把待审批标为过期
  */
 func (m *Manager) Recover(ctx context.Context) error {
 	list, err := m.d.Store.Sessions(ctx)
@@ -187,7 +187,15 @@ func (m *Manager) Recover(ctx context.Context) error {
 			m.d.Store.DecideApproval(ctx, a.ID, store.ApprovalExpired, "system")
 			m.emit(ctx, s.ID, "approval.done", map[string]any{"id": a.ID, "status": store.ApprovalExpired})
 		}
-		if s.State != StateIdle {
+		needsRecovery := s.State != StateIdle
+		if !needsRecovery {
+			// 队列只存在内存中；旧版本可能已空闲却仍留有未处理的排队记录。
+			needsRecovery, err = m.d.Store.HasQueuedMessages(ctx, s.ID)
+			if err != nil {
+				return err
+			}
+		}
+		if needsRecovery {
 			m.emit(ctx, s.ID, "system", map[string]any{"text": "电脑端服务已重启，会话已恢复"})
 			m.setStateDirect(ctx, s.ID, StateIdle)
 		}
@@ -637,8 +645,8 @@ func (m *Manager) finishTurn(ctx context.Context, rt *runtime, p agent.Process) 
 	if !wasInterrupted {
 		m.notify(ctx, rt.sess, "会话已完成", "")
 	}
-	// 4、排队
-	if len(rt.queue) > 0 && !wasInterrupted {
+	// 4、打断时已清空旧队列；此后收到的新消息应在收尾后继续执行
+	if len(rt.queue) > 0 {
 		next := rt.queue[0]
 		rt.queue = rt.queue[1:]
 		m.emit(ctx, rt.id, "system", map[string]any{"text": "开始处理排队消息"})

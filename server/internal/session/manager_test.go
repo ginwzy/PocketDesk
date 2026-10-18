@@ -386,6 +386,64 @@ func TestInterruptForceClosesStuckProcess(t *testing.T) {
 	}
 }
 
+func TestMessagesQueuedDuringInterruptResume(t *testing.T) {
+	for _, forceClose := range []bool{false, true} {
+		name := "agent_end"
+		if forceClose {
+			name = "forced_exit"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			grace := time.Minute
+			if forceClose {
+				grace = 200 * time.Millisecond
+			}
+			f.m.SetTimeouts(time.Minute, grace)
+			ctx := context.Background()
+			s, err := f.m.Create(ctx, "pi", "w1", ".", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, text := range []string{"stuck", "cancelled"} {
+				if err := f.m.Send(ctx, s.ID, Input{Text: text}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p := f.pi.last()
+			if err := f.m.Interrupt(ctx, s.ID); err != nil {
+				t.Fatal(err)
+			}
+			for _, text := range []string{"continue", "next"} {
+				if err := f.m.Send(ctx, s.ID, Input{Text: text}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !forceClose {
+				p.emit(agent.EvTurnEnd)
+			}
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				if hasEvent(f.events(t, s.ID), "msg.done", `"text":"re:next"`) && f.m.State(s.ID) == StateIdle {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			if !hasEvent(f.events(t, s.ID), "msg.done", `"text":"re:next"`) {
+				t.Fatalf("打断后发送的消息未自动执行，状态 %s", f.m.State(s.ID))
+			}
+			var sent []string
+			f.pi.mu.Lock()
+			for _, proc := range f.pi.procs {
+				sent = append(sent, proc.sentList()...)
+			}
+			f.pi.mu.Unlock()
+			if strings.Join(sent, ",") != "stuck,continue,next" {
+				t.Fatalf("应取消旧队列并按顺序处理打断后的新消息: %v", sent)
+			}
+		})
+	}
+}
+
 func TestApprovalAllowAlwaysAndRule(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -546,6 +604,52 @@ func TestDiffSummaryGitAndPlain(t *testing.T) {
 	}
 	if _, err := f.m.Diff(ctx, g.ID, "../../etc/passwd", ""); err == nil {
 		t.Fatal("越界路径应拒绝")
+	}
+}
+
+func TestRecoverCancelsStrandedQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		texts        []string
+		wantRecovery bool
+	}{
+		{"queued_after_interrupt", []string{"已打断", "queued"}, true},
+		{"already_started", []string{"queued", "开始处理排队消息"}, false},
+		{"already_cancelled", []string{"queued", "已打断"}, false},
+		{"new_queue_after_cancel", []string{"queued", "已打断", "queued"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			ctx := context.Background()
+			s, err := f.m.Create(ctx, "pi", "w1", ".", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, text := range tc.texts {
+				typ := "system"
+				data := map[string]any{"text": text}
+				if text == "queued" {
+					typ = "msg.user"
+					data["queued"] = true
+				}
+				if _, err := f.st.AppendEvent(ctx, s.ID, typ, data); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := f.m.Recover(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if got := hasEvent(f.events(t, s.ID), "system", "电脑端服务已重启，会话已恢复"); got != tc.wantRecovery {
+				t.Fatalf("恢复事件 = %v，期望 %v", got, tc.wantRecovery)
+			}
+			before := len(f.events(t, s.ID))
+			if err := f.m.Recover(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if len(f.events(t, s.ID)) != before {
+				t.Fatal("再次启动不应重复取消已经清理的队列")
+			}
+		})
 	}
 }
 

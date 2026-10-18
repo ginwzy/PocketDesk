@@ -118,7 +118,7 @@ class UserBubble extends StatelessWidget {
     final c = context.pd;
     final text = item.fileName.isNotEmpty && item.text.isEmpty ? '[文字] ${item.fileName}' : item.text;
     return Row(mainAxisAlignment: MainAxisAlignment.end, crossAxisAlignment: CrossAxisAlignment.start, children: [
-      if (item.queued) Padding(padding: const EdgeInsets.only(right: 6, top: 10), child: Text('排队中', style: TextStyle(fontSize: PdFont.tiny, color: c.text3))),
+      if (item.queued || item.cancelled) Padding(padding: const EdgeInsets.only(right: 6, top: 10), child: Text(item.cancelled ? '已取消' : '排队中', style: TextStyle(fontSize: PdFont.tiny, color: c.text3))),
       Flexible(child: Bubble(
         mine: true,
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
