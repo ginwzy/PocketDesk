@@ -19,17 +19,18 @@ import (
 
 /** lineProc：逐行输出的子进程 */
 type lineProc struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	wmu     sync.Mutex
-	events  chan Event
-	done    chan struct{}
-	errMu   sync.Mutex
-	err     error
-	stderr  *tailBuffer
-	closeMu sync.Once
-	emitMu  sync.RWMutex
-	closed  bool
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	wmu      sync.Mutex
+	events   chan Event
+	stopping chan struct{}
+	done     chan struct{}
+	errMu    sync.Mutex
+	err      error
+	stderr   *tailBuffer
+	closeMu  sync.Once
+	emitMu   sync.RWMutex
+	closed   bool
 }
 
 /**
@@ -54,7 +55,7 @@ func startLineProc(argv []string, cwd string, env []string, onLine func(*linePro
 	cmd.Env = append(sysenv.Login(), env...)
 	setProcAttr(cmd)
 	// 2、管道
-	p := &lineProc{cmd: cmd, events: make(chan Event, 256), done: make(chan struct{}), stderr: &tailBuffer{max: 8192}}
+	p := &lineProc{cmd: cmd, events: make(chan Event, 256), done: make(chan struct{}), stopping: make(chan struct{}), stderr: &tailBuffer{max: 8192}}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -109,6 +110,7 @@ func (p *lineProc) emit(e Event) {
 		return
 	}
 	select {
+	case <-p.stopping:
 	case <-p.done:
 	case p.events <- e:
 	}
@@ -145,6 +147,9 @@ func (p *lineProc) signalInterrupt() error { return interruptProcess(p.cmd) }
 /** Close：关闭输入并结束进程组 */
 func (p *lineProc) Close() error {
 	p.closeMu.Do(func() {
+		// The stdout reader must be able to reach Wait even when the session
+		// lock prevents its event consumer from draining the bounded queue.
+		close(p.stopping)
 		p.stdin.Close()
 		select {
 		case <-p.done:

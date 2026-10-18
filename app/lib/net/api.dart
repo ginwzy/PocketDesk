@@ -254,13 +254,29 @@ class PdApi {
   }
 
   /** sendMessage：发送消息 */
-  Future<void> sendMessage(String id, String text, {List<String> attachments = const [], String clientId = '', List<SkillInfo> skills = const []}) =>
+  Future<void> sendMessage(String id, String text, {List<String> attachments = const [], String clientId = '', List<SkillInfo> skills = const [], String? expectedBranch}) =>
       send('POST', '/api/sessions/$id/messages', body: {
         'text': text,
+        'expectedBranch': ?expectedBranch,
         if (attachments.isNotEmpty) 'attachments': attachments,
         if (clientId.isNotEmpty) 'clientId': clientId,
         if (skills.isNotEmpty) 'skills': [for (final k in skills) {'name': k.name, 'path': k.path}],
       });
+
+  Future<Map<String, dynamic>> sessionHistory(String id) async =>
+      Json.map(await json('GET', '/api/sessions/$id/history', wait: const Duration(seconds: 45)));
+
+  Future<Map<String, dynamic>> historyEntries(String id, String targetId, {int before = -1, int limit = 50}) async {
+    final page = Json.map(await json('GET', '/api/sessions/$id/history/entries', query: {'targetId': targetId, 'before': '$before', 'limit': '$limit'}, wait: const Duration(seconds: 45)));
+    if (!page.containsKey('before')) throw ApiException(409, 'history_upgrade_required', '请更新电脑端后再预览历史');
+    return page;
+  }
+
+  Future<Map<String, dynamic>> navigateHistory(String id, Map<String, dynamic> request) async =>
+      Json.map(await json('POST', '/api/sessions/$id/history/navigate', body: request, wait: const Duration(seconds: 50)));
+
+  Future<Map<String, dynamic>> historyOperation(String id, String operationId) async =>
+      Json.map(await json('GET', '/api/sessions/$id/history/operations/$operationId', wait: const Duration(seconds: 45)));
 
   /** interrupt：打断 */
   Future<void> interrupt(String id) => send('POST', '/api/sessions/$id/interrupt');

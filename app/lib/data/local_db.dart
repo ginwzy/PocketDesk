@@ -27,6 +27,7 @@ class LocalDb {
     'CREATE TABLE IF NOT EXISTS event_cache (host_id TEXT NOT NULL, session_id TEXT NOT NULL, seq INTEGER NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (host_id, session_id, seq))',
     'CREATE TABLE IF NOT EXISTS reading_pos (host_id TEXT NOT NULL, ws_id TEXT NOT NULL, rel_path TEXT NOT NULL, pdf_etag TEXT NOT NULL DEFAULT \'\', page INTEGER NOT NULL DEFAULT 1, offset REAL NOT NULL DEFAULT 0, PRIMARY KEY (host_id, ws_id, rel_path))',
     'CREATE TABLE IF NOT EXISTS drafts (host_id TEXT NOT NULL, session_id TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY (host_id, session_id))',
+    'CREATE TABLE IF NOT EXISTS history_drafts (host_id TEXT NOT NULL, session_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(host_id,session_id))',
     'CREATE TABLE IF NOT EXISTS phrases (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL UNIQUE)',
     'CREATE TABLE IF NOT EXISTS hidden_sessions (host_id TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY (host_id, session_id))',
     'CREATE TABLE IF NOT EXISTS hidden_items (host_id TEXT NOT NULL, session_id TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY (host_id, session_id, seq))',
@@ -35,7 +36,7 @@ class LocalDb {
   /** open：打开数据库并建表；factory 与路径可替换，测试时用内存库 */
   static Future<LocalDb> open(DatabaseFactory factory, String path) async {
     final db = await factory.openDatabase(path, options: OpenDatabaseOptions(
-      version: 2,
+      version: 3,
       onCreate: (db, _) async {
         for (final q in _schema) {
           await db.execute(q);
@@ -84,7 +85,7 @@ class LocalDb {
   Future<void> deleteHost(String id) async {
     await db.transaction((t) async {
       await t.rawDelete('DELETE FROM transfer_parts WHERE transfer_id IN (SELECT id FROM transfers WHERE host_id=?)', [id]);
-      for (final table in ['transfers', 'hosts', 'session_cache', 'event_cache', 'reading_pos', 'drafts', 'hidden_sessions']) {
+      for (final table in ['transfers', 'hosts', 'session_cache', 'event_cache', 'reading_pos', 'drafts', 'history_drafts', 'hidden_sessions']) {
         await t.delete(table, where: table == 'hosts' ? 'id=?' : 'host_id=?', whereArgs: [id]);
       }
     });
@@ -196,6 +197,15 @@ class LocalDb {
   }
 
   /* ---------- 草稿与快捷短语 ---------- */
+
+  Future<void> saveHistoryDraft(String hostId, String sessionId, Map<String, dynamic> data) async {
+    await db.insert('history_drafts', {'host_id': hostId, 'session_id': sessionId, 'data': jsonEncode(data)}, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<Map<String, dynamic>> historyDraft(String hostId, String sessionId) async {
+    final rows = await db.query('history_drafts', where: 'host_id=? AND session_id=?', whereArgs: [hostId, sessionId]);
+    return rows.isEmpty ? {} : Json.map(jsonDecode(rows.first['data']! as String));
+  }
 
   /** saveDraft：保存未发送的草稿，空文本即删除 */
   Future<void> saveDraft(String hostId, String sessionId, String text) async {

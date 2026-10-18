@@ -23,6 +23,9 @@ var piApproveExt []byte
 //go:embed pi_send.ts
 var piSendExt []byte
 
+//go:embed pi_history.ts
+var piHistoryExt []byte
+
 /** piApprovalTitle：审批扩展发起选择请求时的标题前缀，后接 JSON 内容 */
 const piApprovalTitle = "pocketdesk:approval "
 
@@ -82,6 +85,11 @@ func (PiDriver) Start(ctx context.Context, opt Options) (Process, error) {
 	}
 	// 1、启动；有审批方时加载审批扩展，有发送命令时加载发到手机扩展
 	args := PiArgs(opt)
+	historyExt, err := piExtensionPath("pi-history.ts", piHistoryExt)
+	if err != nil {
+		return nil, fmt.Errorf("准备历史扩展失败: %w", err)
+	}
+	args = append(args, "-e", historyExt)
 	env := append(EnvPath(), opt.Env...)
 	if opt.Approver != nil && !opt.AutoApprove {
 		ext, err := piExtensionPath("pi-approve.ts", piApproveExt)
@@ -102,7 +110,7 @@ func (PiDriver) Start(ctx context.Context, opt Options) (Process, error) {
 	parser := &piParser{}
 	proc := &piProc{opt: opt, pending: map[string]chan piResponse{}}
 	p, err := startLineProc(args, opt.Cwd, env, func(lp *lineProc, line []byte) {
-		if proc.resolve(line) {
+		if proc.resolveHistory(line) || proc.resolve(line) {
 			return
 		}
 		if bytes.Contains(line, []byte(`"extension_ui_request"`)) {
@@ -260,7 +268,7 @@ func (p *piParser) parse(line []byte) []Event {
 		return append(out, ev(EvUsage, "inputTokens", l.Message.Usage.Input, "outputTokens", l.Message.Usage.Output, "costUsd", l.Message.Usage.Cost.Total))
 	// 3、工具
 	case "tool_execution_start":
-		out := []Event{ev(EvToolStart, "id", l.ToolCallID, "name", l.ToolName, "kind", piToolKind(l.ToolName), "summary", piSummary(l.ToolName, l.Args), "input", l.Args)}
+		out := []Event{ev(EvToolStart, "id", l.ToolCallID, "name", l.ToolName, "kind", PiToolKind(l.ToolName), "summary", PiSummary(l.ToolName, l.Args), "input", l.Args)}
 		if l.ToolName == "write" || l.ToolName == "edit" {
 			if fp, _ := l.Args["path"].(string); fp != "" {
 				out = append(out, ev(EvFileWrite, "path", fp))
@@ -313,8 +321,8 @@ func (p *piParser) parse(line []byte) []Event {
 	return nil
 }
 
-/** piToolKind：Pi 内置工具归类 */
-func piToolKind(name string) string {
+/** PiToolKind：Pi 内置工具归类 */
+func PiToolKind(name string) string {
 	switch name {
 	case "bash":
 		return "command"
@@ -328,8 +336,8 @@ func piToolKind(name string) string {
 	return "other"
 }
 
-/** piSummary：工具摘要 */
-func piSummary(name string, args map[string]any) string {
+/** PiSummary：工具摘要 */
+func PiSummary(name string, args map[string]any) string {
 	if c, _ := args["command"].(string); c != "" {
 		return c
 	}

@@ -34,7 +34,7 @@ class SessionsStore extends ChangeNotifier with SafeNotifier {
   final Map<String, int> _seen = {};
 
   /** 正在补拉的会话，以及补拉期间又发现缺口、需要再拉一次的会话 */
-  final Set<String> _catching = {};
+  final Map<String, Future<void>> _catching = {};
   final Set<String> _catchAgain = {};
   final Map<String, List<PdEvent>> _pendingCache = {};
   Timer? _flush;
@@ -108,10 +108,19 @@ class SessionsStore extends ChangeNotifier with SafeNotifier {
   Future<void> _resync(String id, int remote) async {
     try {
       final recent = await api().events(id, before: remote + 1, limit: 200);
+      final current = _logs[id];
+      // A navigation snapshot may arrive while this older HTTP read is in flight.
+      if (current != null && current.lastSeq > (recent.lastOrNull?.seq ?? 0)) {
+        await catchUp(id);
+        return;
+      }
       _logs[id]?.reset(recent);
       if (recent.isNotEmpty) _cursors[id] = recent.last.seq;
       await db.clearEvents(hostId, id);
       await db.cacheEvents(hostId, id, recent);
+      // A mandatory history snapshot may fill the server's response limit
+      // before reaching the advertised remote cursor.
+      if ((_logs[id]?.lastSeq ?? 0) < remote) await catchUp(id);
       notifyListeners();
     } catch (e) {
       _logDb(e);
@@ -146,7 +155,7 @@ class SessionsStore extends ChangeNotifier with SafeNotifier {
     // 1、已加载
     final existing = _logs[id];
     if (existing != null) return existing;
-    var log = ChatLog(id);
+    final log = ChatLog(id);
     _logs[id] = log;
     // 2、缓存
     for (final e in await db.cachedEvents(hostId, id)) {
@@ -155,16 +164,9 @@ class SessionsStore extends ChangeNotifier with SafeNotifier {
     // 3、最近一段
     final remote = byId(id)?.lastSeq ?? 0;
     if (remote - log.lastSeq > _gapLimit || (log.lastSeq == 0 && remote > 200)) {
-      try {
-        final recent = await api().events(id, before: remote + 1, limit: 200);
-        log = ChatLog(id)..prepend(recent);
-        _logs[id] = log;
-        // 旧缓存与最近一段不连续，丢弃后只缓存最近一段
-        await db.clearEvents(hostId, id).catchError(_logDb);
-        await db.cacheEvents(hostId, id, recent).catchError(_logDb);
-      } on ApiException {
-        // 离线时先展示缓存
-      }
+      // Keep the same projection object: websocket updates and in-flight
+      // catch-ups may already hold it. Share the stale-response guard.
+      await _resync(id, remote);
     }
     // 4、补拉
     await catchUp(id);
@@ -178,14 +180,20 @@ class SessionsStore extends ChangeNotifier with SafeNotifier {
    * 1、同一会话同时只补拉一次，期间再次请求的在结束后重拉
    * 2、分页拉取并按序号合并，写入缓存
    */
-  Future<void> catchUp(String id) async {
-    final log = _logs[id];
-    if (log == null) return;
-    // 1、合并并发请求
-    if (!_catching.add(id)) {
+  Future<void> catchUp(String id) {
+    final pending = _catching[id];
+    if (pending != null) {
       _catchAgain.add(id);
-      return;
+      return pending;
     }
+    final log = _logs[id];
+    if (log == null) return Future<void>.value();
+    final pendingWork = _catchUp(id, log);
+    _catching[id] = pendingWork;
+    return pendingWork;
+  }
+
+  Future<void> _catchUp(String id, ChatLog log) async {
     try {
       do {
         _catchAgain.remove(id);
@@ -206,7 +214,7 @@ class SessionsStore extends ChangeNotifier with SafeNotifier {
       // 离线时先展示缓存，重连就绪后会再次补拉
       notifyListeners();
     } finally {
-      _catching.remove(id);
+      unawaited(_catching.remove(id));
     }
   }
 

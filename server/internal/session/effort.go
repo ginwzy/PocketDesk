@@ -43,6 +43,12 @@ func (m *Manager) Effort(ctx context.Context, id string, level *string) (EffortI
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.historyBlocked {
+		return info, ErrHistoryPending
+	}
+	if err := checkHistoryFile(rt); err != nil {
+		return info, err
+	}
 	if rt.sess.Kind != agent.KindPi {
 		return info, &EffortError{fmt.Errorf("/effort 当前仅支持 Pi 会话：%w", agent.ErrUnsupported)}
 	}

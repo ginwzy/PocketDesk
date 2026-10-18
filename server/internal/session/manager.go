@@ -105,15 +105,20 @@ type Manager struct {
 
 /** runtime：一个会话的运行时 */
 type runtime struct {
-	mu       sync.Mutex
-	id       string
-	sess     store.Session
-	proc     agent.Process
-	state    string
-	queue    []Input
-	last     *Input
-	turn     *turn
-	restarts int
+	mu               sync.Mutex
+	id               string
+	sess             store.Session
+	proc             agent.Process
+	state            string
+	queue            []Input
+	last             *Input
+	turn             *turn
+	restarts         int
+	historyEnabled   bool
+	historyPersisted bool
+	historyBlocked   bool
+	historyBranch    string
+	historyStart     int64
 }
 
 /** turn：一轮执行的上下文 */
@@ -134,9 +139,12 @@ type turn struct {
 
 /** Input：一条发送请求 */
 type Input struct {
-	Text        string   `json:"text"`
-	Attachments []string `json:"attachments"`
-	ClientID    string   `json:"clientId"`
+	Text                string   `json:"text"`
+	Attachments         []string `json:"attachments"`
+	ClientID            string   `json:"clientId"`
+	ExpectedBranch      *string  `json:"expectedBranch,omitempty"`
+	PocketDeskSessionID string   `json:"pocketdeskSessionId,omitempty"`
+	EventSeq            int64    `json:"eventSeq,omitempty"`
 	// Skills：本条消息要使用的 skill
 	Skills []agent.SkillRef `json:"skills"`
 }
@@ -198,6 +206,20 @@ func (m *Manager) Recover(ctx context.Context) error {
 		if needsRecovery {
 			m.emit(ctx, s.ID, "system", map[string]any{"text": "电脑端服务已重启，会话已恢复"})
 			m.setStateDirect(ctx, s.ID, StateIdle)
+		}
+		if s.Kind == agent.KindPi {
+			ops, e := m.d.Store.PendingHistoryOperations(ctx, s.ID)
+			if e != nil {
+				return e
+			}
+			if len(ops) > 0 {
+				recoverCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				_, e = m.History(recoverCtx, s.ID)
+				cancel()
+				if e != nil {
+					slog.Warn("会话历史等待恢复", "session", s.ID, "err", e)
+				}
+			}
 		}
 	}
 	return nil
@@ -306,6 +328,20 @@ func (m *Manager) runtime(ctx context.Context, id string) (*runtime, error) {
 		return nil, ErrNotAgent
 	}
 	rt := &runtime{id: id, sess: s, state: StateIdle}
+	if s.Kind == agent.KindPi {
+		if _, branch, err := m.d.Store.HistoryPosition(ctx, id); err == nil {
+			rt.historyEnabled = true
+			rt.historyPersisted = true
+			rt.historyBranch = branch
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+		ops, err := m.d.Store.PendingHistoryOperations(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		rt.historyBlocked = len(ops) > 0
+	}
 	m.rts[id] = rt
 	return rt, nil
 }
@@ -334,9 +370,21 @@ func (m *Manager) Send(ctx context.Context, id string, in Input) error {
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.sess.Kind == agent.KindPi && strings.HasPrefix(strings.TrimSpace(in.Text), "/pocketdesk-history") {
+		return errors.New("这是内部历史指令，请使用历史分支入口")
+	}
 	// 同一条消息因网络超时被重发时直接视为成功
 	if in.ClientID != "" && m.recent.Has(id+"\x00"+in.ClientID) {
 		return nil
+	}
+	if rt.historyBlocked {
+		return ErrHistoryPending
+	}
+	if err := checkHistoryFile(rt); err != nil {
+		return err
+	}
+	if rt.historyEnabled && ((in.ExpectedBranch == nil && rt.historyBranch != "") || (in.ExpectedBranch != nil && *in.ExpectedBranch != rt.historyBranch)) {
+		return ErrHistoryConflict
 	}
 	if rt.sess.Title == agent.Label(rt.sess.Kind) && in.Text != "" {
 		title := agent.Label(rt.sess.Kind) + " · " + snippet(in.Text, 16)
@@ -347,7 +395,7 @@ func (m *Manager) Send(ctx context.Context, id string, in Input) error {
 	busy := rt.state == StateRunning || rt.state == StateAwaiting || rt.state == StateInterrupted
 	// 2、执行中
 	if busy {
-		if err := m.emitUser(ctx, rt, in, true); err != nil {
+		if err := m.emitUser(ctx, rt, &in, true); err != nil {
 			return err
 		}
 		rt.queue = append(rt.queue, in)
@@ -355,7 +403,7 @@ func (m *Manager) Send(ctx context.Context, id string, in Input) error {
 	}
 	// 3、空闲：先补上电脑上新增的对话
 	m.syncTranscript(ctx, rt, false)
-	if err := m.emitUser(ctx, rt, in, false); err != nil {
+	if err := m.emitUser(ctx, rt, &in, false); err != nil {
 		return err
 	}
 	m.startTurn(ctx, rt, in)
@@ -363,7 +411,7 @@ func (m *Manager) Send(ctx context.Context, id string, in Input) error {
 }
 
 /** emitUser：记录用户消息事件 */
-func (m *Manager) emitUser(ctx context.Context, rt *runtime, in Input, queued bool) error {
+func (m *Manager) emitUser(ctx context.Context, rt *runtime, in *Input, queued bool) error {
 	data := map[string]any{"text": in.Text, "attachments": in.Attachments, "queued": queued, "clientId": in.ClientID}
 	if len(in.Skills) > 0 {
 		names := make([]string, 0, len(in.Skills))
@@ -372,9 +420,12 @@ func (m *Manager) emitUser(ctx context.Context, rt *runtime, in Input, queued bo
 		}
 		data["skills"] = names
 	}
-	if err := m.emit(ctx, rt.id, "msg.user", data); err != nil {
+	ev, err := m.emitEvent(ctx, rt.id, "msg.user", data)
+	if err != nil {
 		return err
 	}
+	in.EventSeq = ev.Seq
+	in.PocketDeskSessionID = rt.id
 	// 记录成功后才登记编号，失败时手机重发会重新处理
 	m.recent.Add(rt.id + "\x00" + in.ClientID)
 	return nil
@@ -389,6 +440,7 @@ func (m *Manager) emitUser(ctx context.Context, rt *runtime, in Input, queued bo
  * 3、状态切到执行中并发送消息
  */
 func (m *Manager) startTurn(ctx context.Context, rt *runtime, in Input) {
+	rt.historyStart = 0
 	ctx = context.WithoutCancel(ctx)
 	last := in
 	rt.last = &last
@@ -415,6 +467,18 @@ func (m *Manager) startTurn(ctx context.Context, rt *runtime, in Input) {
 		return
 	}
 	// 3、发送
+	if h, ok := proc.(agent.HistoryController); ok {
+		if _, err := h.History(ctx, map[string]any{"action": "input", "input": in}); err != nil {
+			if rt.historyEnabled || !errors.Is(err, agent.ErrUnsupported) {
+				m.emit(ctx, rt.id, "error", map[string]any{"message": "保存原始输入失败：" + err.Error(), "retryable": true})
+				rt.turn = nil
+				m.setState(ctx, rt, StateIdle)
+				return
+			}
+		} else {
+			rt.historyStart = in.EventSeq
+		}
+	}
 	m.setState(ctx, rt, StateRunning)
 	if err := proc.Send(ctx, agent.Message{Text: withInstruction(rt.sess.Instruction, in.Text), Attachments: in.Attachments, Skills: in.Skills}); err != nil {
 		m.emit(ctx, rt.id, "error", map[string]any{"message": "发送失败：" + err.Error(), "retryable": true})
@@ -562,6 +626,9 @@ func deltaKey(e agent.Event) string {
 func (m *Manager) handle(ctx context.Context, rt *runtime, p agent.Process, e agent.Event) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if p != rt.proc {
+		return
+	}
 	switch e.Type {
 	// 1、会话 ID
 	case agent.EvSessionID:
@@ -636,6 +703,21 @@ func (m *Manager) finishTurn(ctx context.Context, rt *runtime, p agent.Process) 
 		}
 	})
 	wasInterrupted := rt.state == StateInterrupted
+	if h, ok := p.(agent.HistoryController); ok && rt.historyStart > 0 {
+		if s, e := m.d.Store.Session(ctx, rt.id); e == nil {
+			_, e = h.History(ctx, map[string]any{"action": "checkpoint", "input": map[string]any{"start": rt.historyStart, "end": s.LastSeq, "pocketdeskSessionId": rt.id}})
+			if e != nil {
+				m.emit(ctx, rt.id, "system", map[string]any{"text": "历史保存位置未更新：" + e.Error()})
+			}
+		}
+
+		if st, e := m.readHistory(ctx, rt, h); e == nil {
+			if e = m.bindHistory(ctx, rt, st, rt.historyStart); e != nil {
+				m.emit(ctx, rt.id, "system", map[string]any{"text": "历史节点关联稍后将在打开历史时恢复"})
+			}
+		}
+		rt.historyStart = 0
+	}
 	m.denyPending(ctx, rt.id, "本轮已结束")
 	m.setState(ctx, rt, StateIdle)
 	if !wasInterrupted {
@@ -800,6 +882,12 @@ func (m *Manager) Retry(ctx context.Context, id string) error {
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.historyBlocked {
+		return ErrHistoryPending
+	}
+	if err := checkHistoryFile(rt); err != nil {
+		return err
+	}
 	if rt.state == StateRunning || rt.state == StateAwaiting || rt.state == StateInterrupted {
 		return ErrBusy
 	}
@@ -810,7 +898,7 @@ func (m *Manager) Retry(ctx context.Context, id string) error {
 		rt.restarts = 0
 	}
 	in := *rt.last
-	m.emitUser(ctx, rt, in, false)
+	m.emitUser(ctx, rt, &in, false)
 	m.startTurn(ctx, rt, in)
 	return nil
 }
@@ -887,6 +975,9 @@ func (m *Manager) Update(ctx context.Context, id string, p Patch) (store.Session
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	restart := p.Model != nil || p.Cwd != nil || p.Provider != nil
+	if restart && rt.historyBlocked {
+		return cur, ErrHistoryPending
+	}
 	if restart && (rt.state == StateRunning || rt.state == StateAwaiting) {
 		return cur, ErrBusy
 	}
@@ -1027,26 +1118,31 @@ func (m *Manager) setStateDirect(ctx context.Context, id, st string) {
  * 3、广播给在线连接（与写库在同一把会话锁内，推送顺序与序号一致）
  */
 func (m *Manager) emit(ctx context.Context, id, typ string, data map[string]any) error {
+	_, err := m.emitEvent(ctx, id, typ, data)
+	return err
+}
+
+func (m *Manager) emitEvent(ctx context.Context, id, typ string, data map[string]any) (store.Event, error) {
 	if m.closed.Load() {
-		return ErrClosed
+		return store.Event{}, ErrClosed
 	}
 	// 已被接受的操作必须记录完整，不随手机断开连接而取消
 	ctx = context.WithoutCancel(ctx)
 	// 1、3、写库并在同一把会话锁内按序号广播
-	_, err := m.d.Store.AppendEventThen(ctx, id, typ, data, func(e store.Event) {
+	event, err := m.d.Store.AppendEventThen(ctx, id, typ, data, func(e store.Event) {
 		if m.d.Hub != nil {
 			m.d.Hub.Publish(hub.Message{Session: id, Seq: e.Seq, Type: e.Type, Data: e.Data, CreatedAt: e.CreatedAt})
 		}
 	})
 	if err != nil {
 		slog.Warn("写入事件失败", "session", id, "type", typ, "err", err)
-		return err
+		return event, err
 	}
 	// 2、摘要
 	if pv, ok := previewFor(typ, data); ok {
 		m.d.Store.UpdateSession(ctx, id, store.SessionPatch{Preview: &pv})
 	}
-	return nil
+	return event, nil
 }
 
 /**

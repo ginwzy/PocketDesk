@@ -181,7 +181,7 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrNotFound
 		}
-		for _, q := range []string{`DELETE FROM events WHERE session_id=?`, `DELETE FROM approvals WHERE session_id=?`, `DELETE FROM rules WHERE session_id=?`, `DELETE FROM turn_diffs WHERE session_id=?`} {
+		for _, q := range []string{`DELETE FROM events WHERE session_id=?`, `DELETE FROM approvals WHERE session_id=?`, `DELETE FROM rules WHERE session_id=?`, `DELETE FROM turn_diffs WHERE session_id=?`, `DELETE FROM history_operations WHERE session_id=?`, `DELETE FROM history_state WHERE session_id=?`} {
 			if _, err := t.ExecContext(ctx, q, id); err != nil {
 				return err
 			}
@@ -240,6 +240,30 @@ func (s *Store) AppendEventThen(ctx context.Context, sessionID, typ string, data
 
 /** EventsAfter：取某序号之后的事件，最多 limit 条 */
 func (s *Store) EventsAfter(ctx context.Context, sessionID string, after int64, limit int) ([]Event, error) {
+	if limit <= 0 || limit > 5000 {
+		limit = 5000
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT session_id,seq,type,data,created_at FROM events WHERE session_id=? AND seq>? AND seq>=COALESCE((SELECT MAX(seq) FROM events WHERE session_id=? AND type='history.reset'),0) ORDER BY seq LIMIT ?`,
+		sessionID, after, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Event{}
+	for rows.Next() {
+		var e Event
+		var data string
+		if err := rows.Scan(&e.Session, &e.Seq, &e.Type, &data, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		e.Data = json.RawMessage(data)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) RawEventsAfter(ctx context.Context, sessionID string, after int64, limit int) ([]Event, error) {
 	if limit <= 0 || limit > 5000 {
 		limit = 5000
 	}
@@ -303,7 +327,16 @@ func (s *Store) EventsBefore(ctx context.Context, sessionID string, before int64
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if len(out) > 0 {
+		if reset, err := s.LatestHistory(ctx, sessionID); err == nil && reset.Seq < out[0].Seq {
+			return s.EventsAfter(ctx, sessionID, reset.Seq-1, 5000)
+		}
+	}
+	return out, nil
 }
 
 /** scanSession：读取一行会话记录 */

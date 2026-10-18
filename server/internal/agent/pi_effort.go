@@ -81,7 +81,7 @@ func (p *piProc) call(ctx context.Context, command string, fields map[string]any
 	select {
 	case r := <-ch:
 		if !r.Success {
-			return fmt.Errorf("Pi 无法执行思考强度操作，请确认版本支持 /effort：%s", r.Error)
+			return fmt.Errorf("Pi %s 操作失败，请确认版本支持该接口：%s", command, r.Error)
 		}
 		if out != nil {
 			return json.Unmarshal(r.Data, out)
@@ -90,7 +90,7 @@ func (p *piProc) call(ctx context.Context, command string, fields map[string]any
 	case <-p.Done():
 		return errors.New("Pi 进程已退出")
 	case <-ctx.Done():
-		return fmt.Errorf("Pi 思考强度请求未完成：%w", ctx.Err())
+		return fmt.Errorf("Pi %s 请求未完成：%w", command, ctx.Err())
 	}
 }
 

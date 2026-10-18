@@ -137,6 +137,8 @@ var migrations = []string{
 		created_at INTEGER NOT NULL,
 		PRIMARY KEY (session_id, ref)
 	)`,
+	`CREATE TABLE IF NOT EXISTS history_operations (session_id TEXT NOT NULL, id TEXT NOT NULL, request TEXT NOT NULL, result TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, PRIMARY KEY(session_id,id))`,
+	`CREATE TABLE IF NOT EXISTS history_state (session_id TEXT PRIMARY KEY, leaf_id TEXT NOT NULL, branch_id TEXT NOT NULL)`,
 }
 
 /** columns：后来新增的列，已有数据库启动时按需补上 */

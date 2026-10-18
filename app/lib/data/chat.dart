@@ -14,6 +14,8 @@ sealed class ChatItem {
 
   /** 事件时间（毫秒） */
   final int at;
+
+  String entryId = '';
 }
 
 /** UserItem：我发出的消息 */
@@ -130,6 +132,9 @@ class Usage {
  * ChatLog：一个会话的聊天记录，按序号幂等地合并事件
  */
 class ChatLog {
+  String? historyLeaf;
+  String? historyBranch;
+  bool _historyProjected = false;
   ChatLog(this.sessionId);
 
   final String sessionId;
@@ -173,6 +178,9 @@ class ChatLog {
       rebuilt._merge(e, append: true);
     }
     items.insertAll(0, rebuilt.items);
+    historyLeaf ??= rebuilt.historyLeaf;
+    historyBranch ??= rebuilt.historyBranch;
+    _historyProjected = _historyProjected || rebuilt._historyProjected;
     _syncQueue();
     rebuilt._byKey.forEach((k, v) => _byKey.putIfAbsent(k, () => v));
     firstSeq = fresh.first.seq;
@@ -184,6 +192,9 @@ class ChatLog {
    */
   void reset(List<PdEvent> recent) {
     items.clear();
+    historyLeaf = null;
+    historyBranch = null;
+    _historyProjected = false;
     _byKey.clear();
     usage
       ..inputTokens = 0
@@ -196,7 +207,7 @@ class ChatLog {
   }
 
   /** hasMoreBefore：是否还有更早的事件可以加载 */
-  bool get hasMoreBefore => firstSeq > 1;
+  bool get hasMoreBefore => !_historyProjected && firstSeq > 1;
 
   /** pendingApprovals：未处理的审批数 */
   int get pendingApprovals => items.whereType<ApprovalItem>().where((a) => a.status == ApprovalStatus.pending).length;
@@ -228,11 +239,30 @@ class ChatLog {
     final d = e.data;
     String str(String k) => Json.str(d[k]);
     void add(String? key, ChatItem it) {
+      it.entryId = str('entryId');
       items.add(it);
       if (key != null) _byKey[key] = it;
     }
 
     switch (e.type) {
+      case 'history.bind':
+        historyLeaf = str('leafId');
+        if (d.containsKey('branchId')) historyBranch = str('branchId');
+        for (final raw in Json.list(d['bindings'])) {
+          final binding = Json.map(raw);
+          final item = binding['messageId'] != null ? _byKey['m:${binding['messageId']}'] : items.where((it) => it.seq == Json.integer(binding['seq'])).firstOrNull;
+          if (item != null) item.entryId = Json.str(binding['entryId']);
+        }
+      case 'history.reset':
+        items.clear();
+        _byKey.clear();
+        historyLeaf = str('leafId');
+        historyBranch = str('branchId');
+        _historyProjected = true;
+        usage..inputTokens = 0..outputTokens = 0..costUsd = 0..turns = 0;
+        for (final raw in Json.list(d['events'])) {
+          _merge(PdEvent.fromJson(Json.map(raw)), append: true);
+        }
       case 'state':
         state = str('state');
       case 'session.model':

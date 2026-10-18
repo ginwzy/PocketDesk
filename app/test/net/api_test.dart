@@ -77,4 +77,19 @@ void main() {
     expect(body, {'pinned': true});
     expect(s.pinned, isTrue);
   });
+  test('历史预览使用服务端逆向游标，拒绝不支持的新协议响应', () async {
+    final requests=<http.Request>[];
+    var legacy=false;
+    final api=PdApi(base:base,client:MockClient((req) async {
+      requests.add(req);
+      return http.Response(legacy ? '{"events":[],"total":100}' : '{"events":[],"before":0,"total":100}',200);
+    }));
+    await api.historyEntries('s','target');
+    expect(requests.last.url.queryParameters,{'targetId':'target','before':'-1','limit':'50'});
+    await api.historyEntries('s','target',before:50);
+    expect(requests.last.url.queryParameters['before'],'50');
+    legacy=true;
+    await expectLater(api.historyEntries('s','target'),throwsA(isA<ApiException>().having((e)=>e.code,'code','history_upgrade_required')));
+  });
+
 }

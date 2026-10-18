@@ -37,6 +37,7 @@ import '../viewers/fetch.dart';
 import '../viewers/open_file.dart';
 import 'agent_pickers.dart';
 import 'diff_page.dart';
+import 'history_page.dart';
 import 'dir_picker.dart';
 import 'session_actions.dart';
 import 'library_pages.dart' show favoriteText, showPromptPicker;
@@ -90,6 +91,10 @@ class _ChatPageState extends State<ChatPage> {
   final Set<ChatItem> _selected = {};
   Timer? _draftTimer;
   bool _sending = false;
+  bool _historyBusy = false;
+  String? _draftBranch;
+  Map<String, dynamic>? _pendingHistory;
+  final List<String> _historyAttachments = [];
 
   /** 随下一条消息使用的 skill */
   List<SkillInfo> _skills = [];
@@ -125,7 +130,7 @@ class _ChatPageState extends State<ChatPage> {
       scope.sessions.removeListener(_onStore);
       scope.transfers.removeListener(_onTransfers);
       _draftTimer?.cancel();
-      unawaited(scope.sessions.db.saveDraft(scope.host.id, _id, _input.text));
+      unawaited(_saveComposition());
     }
     _input.dispose();
     _focus.dispose();
@@ -139,6 +144,11 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _load() async {
     final scope = _scope!;
     final db = scope.sessions.db;
+    final historyDraft = await db.historyDraft(scope.host.id, _id);
+    _draftBranch = historyDraft['branchId'] as String?;
+    if (historyDraft['operation'] != null) _pendingHistory = Json.map(historyDraft['operation']);
+    _historyAttachments.addAll(Json.list(historyDraft['attachments']).map((e) => e.toString()));
+    _skills = Json.list(historyDraft['skills']).map((e) => SkillInfo.fromJson(Json.map(e))).toList();
     _input.text = widget.draft.isNotEmpty ? widget.draft : await db.draft(scope.host.id, _id);
     if (scope.sessions.byId(_id) == null) {
       try {
@@ -152,6 +162,7 @@ class _ChatPageState extends State<ChatPage> {
     if (!mounted) return;
     setState(() {
       _log = log;
+      if (_draftBranch == null && _input.text.isNotEmpty) _draftBranch = widget.draft.isNotEmpty ? (log.historyBranch ?? '') : '';
       _seen = log.items.length;
     });
     _phrases = await db.phrases();
@@ -252,9 +263,20 @@ class _ChatPageState extends State<ChatPage> {
 
   /** _onInput：草稿延迟保存 */
   void _onInput() {
+    if (_input.text.isNotEmpty && _draftBranch == null && _log != null) _draftBranch = _log?.historyBranch ?? '';
+    if (_input.text.isEmpty && !_sending && !_historyBusy && _pending.isEmpty && _historyAttachments.isEmpty) _draftBranch = null;
     _draftTimer?.cancel();
-    _draftTimer = Timer(const Duration(seconds: 1), () => _scope?.sessions.db.saveDraft(_scope!.host.id, _id, _input.text));
+    _draftTimer = Timer(const Duration(seconds: 1), () => unawaited(_saveComposition()));
     setState(() {});
+  }
+
+  Future<void> _saveComposition() async {
+    final scope = _scope;
+    if (scope == null) return;
+    final text = _input.text;
+    final data = <String, dynamic>{'branchId': _draftBranch, 'operation': _pendingHistory, 'attachments': List.of(_historyAttachments), 'skills': [for (final s in _skills) {'name': s.name, 'path': s.path, 'description': s.description, 'scope': s.scope, 'enabled': s.enabled}]};
+    await scope.sessions.db.saveDraft(scope.host.id, _id, text);
+    await scope.sessions.db.saveHistoryDraft(scope.host.id, _id, data);
   }
 
   /** _toBottom：滚到最新 */
@@ -285,15 +307,20 @@ class _ChatPageState extends State<ChatPage> {
    */
   Future<void> _send() async {
     final s = _session;
-    if (s == null || _sending) return;
+    if (s == null || _sending || _historyBusy) return;
     var text = _input.text.trim();
-    if (text.isEmpty && _pending.isEmpty) return;
-    if (s.isAgent && RegExp(r'^/effort(?:\s|$)', caseSensitive: false).hasMatch(text) && _pending.isNotEmpty) {
-      toast(context, '请先移除附件再使用 /effort');
+    if (_draftBranch != null && _log?.historyBranch != null && _draftBranch != _log?.historyBranch) {
+      final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(title: const Text('当前分支已变化'), content: const Text('另一端切换了会话位置。保留这份草稿，并发送到当前分支吗？'), actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('保留草稿')), FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('使用当前分支'))]));
+      if (ok != true || !mounted) return;
+      _draftBranch = _log?.historyBranch;
+    }
+    if (text.isEmpty && _pending.isEmpty && _historyAttachments.isEmpty) return;
+    if (s.isAgent && RegExp(r'^/(?:effort|tree)(?:\s|$)', caseSensitive: false).hasMatch(text) && (_pending.isNotEmpty || _historyAttachments.isNotEmpty)) {
+      toast(context, '请先移除附件再使用此指令');
       return;
     }
     // 1、指令
-    if (s.isAgent && text.startsWith('/') && _pending.isEmpty) {
+    if (s.isAgent && text.startsWith('/') && _pending.isEmpty && _historyAttachments.isEmpty) {
       final name = text.split(RegExp(r'\s')).first.toLowerCase();
       if (slashCommands.any((c) => c.name == name) && name != '/compact') {
         _input.clear();
@@ -304,7 +331,7 @@ class _ChatPageState extends State<ChatPage> {
     setState(() => _sending = true);
     try {
       // 2、附件
-      final attachments = <String>[];
+      final attachments = <String>[..._historyAttachments];
       for (final t in List.of(_pending)) {
         final done = await _scope!.transfers.wait(t);
         if (done.status != TaskStatus.done) {
@@ -324,7 +351,7 @@ class _ChatPageState extends State<ChatPage> {
         _quote = '';
       });
       // 同一内容重试时沿用同一编号：上次其实已送达（只是响应丢了）时电脑端不会重复执行
-      final key = '$text|${attachments.join('|')}';
+      final key = '$text|${attachments.join('|')}|${_draftBranch ?? _log?.historyBranch}';
       if (key != _retryKey) {
         _retryKey = key;
         _retryId = _clientId();
@@ -333,10 +360,12 @@ class _ChatPageState extends State<ChatPage> {
         if (s.isAssistant) {
           await _api.assistantText(text, clientId: _retryId);
         } else {
-          await _api.sendMessage(_id, text, attachments: attachments, clientId: _retryId, skills: _skills);
-          if (mounted) setState(() => _skills = []);
+          await _api.sendMessage(_id, text, attachments: attachments, clientId: _retryId, skills: _skills, expectedBranch: _draftBranch ?? _log?.historyBranch);
+          if (mounted) setState(() { _skills = []; _historyAttachments.clear(); });
         }
         _retryKey = '';
+        _draftBranch = null;
+        unawaited(_saveComposition());
         _toBottom();
       } on ApiException catch (e) {
         _input.text = saved;
@@ -364,6 +393,8 @@ class _ChatPageState extends State<ChatPage> {
           await _openDiff(null, const []);
         case '/model':
           await switchModel(context, s);
+        case '/tree':
+          if (s.kind == 'pi') { await _openHistory(); } else { toast(context, '历史分支当前仅支持 Pi 会话'); }
         case '/effort':
           await switchEffort(context, s, arg: arg);
         case '/provider':
@@ -400,6 +431,97 @@ class _ChatPageState extends State<ChatPage> {
       }
     } on ApiException catch (e) {
       if (mounted) toast(context, e.message);
+    }
+  }
+
+  Future<void> _openHistory({String entryId = ''}) async {
+    if (_session?.kind != 'pi' || _historyBusy) return;
+    setState(() => _historyBusy = true);
+    try {
+      if (_pendingHistory != null) {
+        final resume = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(title: const Text('确认上次切换结果'), content: const Text('上次操作的响应未确认。重试会查询同一操作；如果成功，历史消息会替换当前草稿。'), actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('暂不恢复')), FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('确认并恢复'))]));
+        if (resume != true || !mounted) return;
+        final result = await _api.navigateHistory(_id, _pendingHistory!);
+        await _acceptHistory(result);
+        return;
+      }
+      final history = await _api.sessionHistory(_id);
+      await _scope!.sessions.catchUp(_id);
+      if (!mounted) return;
+      Map<String, dynamic>? node;
+      if (entryId.isNotEmpty) {
+        node = Json.list(history['nodes']).map((e) => Json.map(e)).where((e) => e['id'] == entryId).firstOrNull;
+      }
+      Future<Map<String, dynamic>> loadPreview(String target, int before) => _api.historyEntries(_id, target, before: before);
+      if (node != null) {
+        final initial = node;
+        final turn = Json.list(history['tree']).map(Json.map).where((t) => Json.map(t['user'])['id'] == initial['id'] || Json.map(t['end'])['id'] == initial['id'] || Json.list(t['replies']).any((n) => Json.map(n)['id'] == initial['id'])).firstOrNull ?? {'text': initial['text'], 'user': initial['mode'] == 'edit' ? initial : null, 'end': initial['mode'] != 'edit' ? initial : null, 'replies': []};
+        node = await Navigator.of(context).push<Map<String, dynamic>>(MaterialPageRoute(builder: (_) => HistoryPreviewPage(turn: turn, initialNode: initial, loadPreview: loadPreview)));
+      } else {
+        node = await Navigator.of(context).push<Map<String, dynamic>>(MaterialPageRoute(builder: (_) => HistoryPage(history: history, loadPreview: loadPreview)));
+      }
+      if (node == null || !mounted) return;
+      final preview = node;
+      final previewText = Json.str(preview['text']);
+      final edit = node['mode'] == 'edit';
+      final hasDraft = _input.text.isNotEmpty || _pending.isNotEmpty || _historyAttachments.isNotEmpty || _skills.isNotEmpty;
+      final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+        title: Text(edit ? '回到这条消息之前？' : '切换到这个位置？'),
+        content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(previewText),
+          if (Json.str(preview['inputNotice']).isNotEmpty) Padding(padding: const EdgeInsets.only(top: 12), child: Text(Json.str(preview['inputNotice']))),
+          const SizedBox(height: 16),
+          Text(edit ? '原消息将放回输入框供你修改。原来的后续对话会保留在历史分支中。' : '保留所选位置之前的对话，原分支仍可从历史分支中返回。'),
+          const SizedBox(height: 8),
+          const Text('已修改的文件和已执行的命令不会撤销。'),
+          if (edit && hasDraft) const Padding(padding: EdgeInsets.only(top: 12), child: Text('输入框已有草稿。确认后会用历史消息替换；取消可保留当前草稿。')),
+        ])),
+        actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')), FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(edit && hasDraft ? '替换草稿并回到这里' : '回到这里'))],
+      ));
+      if (ok != true || !mounted) return;
+      final request = {'operationId': _clientId(), 'expectedLeaf': history['leafId'], 'targetId': node['id'], 'mode': node['mode']};
+      _focus.unfocus();
+      _pendingHistory = request;
+      await _saveComposition();
+      final result = await _api.navigateHistory(_id, request);
+      await _acceptHistory(result);
+    } on ApiException catch (e) {
+      if (e.code == 'history_conflict' || e.code == 'history_image_unavailable') { _pendingHistory = null; await _saveComposition(); }
+      if (mounted) toast(context, e.message);
+    } finally {
+      if (mounted) setState(() => _historyBusy = false);
+    }
+  }
+
+  Future<void> _acceptHistory(Map<String, dynamic> result) async {
+    await _scope!.sessions.catchUp(_id);
+    if (!mounted) return;
+    _pendingHistory = null;
+    if (Json.boolean(result['cancelled'])) {
+      await _saveComposition();
+      if (mounted) toast(context, '历史切换已取消');
+      return;
+    }
+    _draftBranch = Json.str(result['branchId']);
+    final draft = Json.map(result['draft']);
+    if (result['draft'] != null) {
+      _input.text = Json.str(draft['text']);
+      setState(() {
+        _pending.clear();
+        _quote = '';
+        _historyAttachments..clear()..addAll(Json.list(draft['attachments']).map((e) => e.toString()));
+        _skills = Json.list(draft['skills']).map((e) { final j=Json.map(e); return SkillInfo(name: Json.str(j['name']), path: Json.str(j['path']), description: '', scope: '', enabled: true); }).toList();
+      });
+    }
+    _retryKey = '';
+    await _saveComposition();
+    if (!mounted) return;
+    _focus.requestFocus();
+    _toBottom();
+    toast(context, result['draft'] != null ? '已回到所选位置，可以修改后发送' : '已切换历史分支');
+    final warnings = Json.list(result['draftWarnings']);
+    if (warnings.isNotEmpty && mounted) {
+      await showDialog<void>(context: context, builder: (ctx) => AlertDialog(title: const Text('部分历史附件不可用'), content: Text('${warnings.join('\n')}\n\n附件引用仍保留在草稿中，请移除不可用附件或重新附加文件。'), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('知道了'))]));
     }
   }
 
@@ -494,7 +616,7 @@ class _ChatPageState extends State<ChatPage> {
     final m = _scope!.transfers;
     for (final f in files) {
       final t = await m.upload(f.path, name: f.name, mime: f.mime, target: s.isAssistant ? 'assistant' : 'session:$_id');
-      if (!s.isAssistant) _pending.add(t);
+      if (!s.isAssistant) { _draftBranch ??= _log?.historyBranch ?? ''; _pending.add(t); }
     }
     if (mounted) {
       setState(() {});
@@ -641,8 +763,10 @@ class _ChatPageState extends State<ChatPage> {
     if (text.isEmpty) return;
     unawaited(HapticFeedback.selectionClick());
     final labels = ['复制', '收藏', '选择文字', '复制全部对话', '引用回复', '多选', '转发到其他会话', '存为 md 文件', '删除'];
-    final i = await actionSheet(context, const [
-      SheetAction('复制', icon: LucideIcons.copy300),
+    final canHistory = _session?.kind == 'pi' && (it is UserItem || it is AgentItem);
+    if (canHistory) labels.add(it is UserItem ? '修改并重试' : '从这里继续');
+    final i = await actionSheet(context, [
+      const SheetAction('复制', icon: LucideIcons.copy300),
       SheetAction('收藏', icon: LucideIcons.star300),
       SheetAction('选择文字', icon: LucideIcons.textCursorInput300),
       SheetAction('复制全部对话', icon: LucideIcons.copyPlus300),
@@ -651,9 +775,13 @@ class _ChatPageState extends State<ChatPage> {
       SheetAction('转发到其他会话', icon: LucideIcons.forward300),
       SheetAction('存为 md 文件', icon: LucideIcons.fileDown300),
       SheetAction('删除', icon: LucideIcons.trash2300, danger: true),
+      if (canHistory) SheetAction(it is UserItem ? '修改并重试' : '从这里继续', icon: LucideIcons.history300),
     ]);
     if (i == null || !mounted) return;
     switch (labels[i]) {
+      case '修改并重试':
+      case '从这里继续':
+        await _openHistory(entryId: it.entryId);
       case '复制':
         await _copy([it]);
       case '收藏':
@@ -752,7 +880,8 @@ class _ChatPageState extends State<ChatPage> {
       if (t.isAssistant) {
         await _api.assistantText(text, clientId: _clientId());
       } else {
-        await _api.sendMessage(t.id, text, clientId: _clientId());
+        final targetLog = await _scope!.sessions.log(t.id);
+        await _api.sendMessage(t.id, text, clientId: _clientId(), expectedBranch: targetLog.historyBranch);
       }
       if (mounted) toast(context, '已转发');
     } on ApiException catch (e) {
@@ -1038,7 +1167,7 @@ class _ChatPageState extends State<ChatPage> {
         }));
       }
     }
-    return [dir, _providerName, s.model, if (s.autoApprove) '免审批', if (s.muted) '已关闭提醒'].where((x) => x.isNotEmpty).join(' · ');
+    return [dir, _providerName, s.model, if (_log?.historyBranch?.isNotEmpty ?? false) '历史分支', if (s.autoApprove) '免审批', if (s.muted) '已关闭提醒'].where((x) => x.isNotEmpty).join(' · ');
   }
 
   @override
@@ -1051,7 +1180,7 @@ class _ChatPageState extends State<ChatPage> {
       return Scaffold(appBar: const PdBar(title: ''), body: Center(child: CircularProgressIndicator(color: c.accent)));
     }
     final entries = _entries(log);
-    final cmds = s.isAgent ? matchCommands(_input.text).where((c) => c.name != '/effort' || s.kind == 'pi').toList() : const <SlashCommand>[];
+    final cmds = s.isAgent ? matchCommands(_input.text).where((c) => (c.name != '/effort' && c.name != '/tree') || s.kind == 'pi').toList() : const <SlashCommand>[];
     return PopScope(
       canPop: !_selecting,
       onPopInvokedWithResult: (did, _) {
@@ -1067,6 +1196,8 @@ class _ChatPageState extends State<ChatPage> {
                 title: sessionTitle(s),
                 subtitle: _subtitle(s),
                 actions: [
+                  if (s.kind == 'pi')
+                    PdIconButton(icon: LucideIcons.history300, tooltip: '历史分支', onTap: _historyBusy ? null : () => _openHistory()),
                   if (s.isAssistant)
                     PdIconButton(
                       icon: LucideIcons.folderCog300,
@@ -1201,6 +1332,8 @@ class _ChatPageState extends State<ChatPage> {
               onPasteImage: _pasteImage,
               onImageInserted: _imageInserted,
               attachments: [
+                for (final path in _historyAttachments)
+                  (name: path.split('/').last, status: '历史附件', remove: () { setState(() => _historyAttachments.remove(path)); unawaited(_saveComposition()); }),
                 for (final t in _pending)
                   (
                     name: TransferManager.displayName(t),
