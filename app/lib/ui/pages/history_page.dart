@@ -6,12 +6,129 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../data/chat.dart';
 import '../../data/models.dart';
 import '../tokens.dart';
+import '../remote_content.dart';
 import '../widgets.dart';
 
 typedef HistoryLoader = Future<Map<String, dynamic>> Function(
   String target,
   int before,
 );
+
+/// Push this route immediately; loading, errors and retries stay on this route.
+class HistoryBrowserPage extends StatelessWidget {
+  const HistoryBrowserPage({
+    super.key,
+    required this.loadHistory,
+    required this.loadPreview,
+    this.entryId = '',
+  });
+  final Future<Map<String, dynamic>> Function() loadHistory;
+  final HistoryLoader loadPreview;
+  final String entryId;
+  @override
+  Widget build(BuildContext context) => RemoteContent<Map<String, dynamic>>(
+    load: loadHistory,
+    message: '正在读取会话历史…',
+    tree: true,
+    frameBuilder: (child, history) => _historyFrame(
+      context,
+      preview:
+          entryId.isNotEmpty && (history == null || _initial(history) != null),
+      child: Column(
+        children: [
+          if (history == null && entryId.isEmpty) const _HistoryToolbar(),
+          Expanded(key: const ValueKey('history-content'), child: child),
+        ],
+      ),
+    ),
+    builder: (context, history) {
+      final initial = _initial(history);
+      if (entryId.isNotEmpty && initial != null) {
+        final turn =
+            Json.list(history['tree'])
+                .map(Json.map)
+                .where(
+                  (t) =>
+                      Json.map(t['user'])['id'] == initial['id'] ||
+                      Json.map(t['end'])['id'] == initial['id'] ||
+                      Json.list(t['replies'])
+                          .any((n) => Json.map(n)['id'] == initial['id']),
+                )
+                .firstOrNull ??
+            {
+              'text': initial['text'],
+              'user': initial['mode'] == 'edit' ? initial : null,
+              'end': initial['mode'] != 'edit' ? initial : null,
+              'replies': [],
+            };
+        return _HistoryPreviewBody(
+          turn: turn,
+          initialNode: initial,
+          expectedLeaf: history['leafId'] as String?,
+          loadPreview: loadPreview,
+        );
+      }
+      return _HistoryTreeBody(history: history, loadPreview: loadPreview);
+    },
+  );
+  Map<String, dynamic>? _initial(Map<String, dynamic> history) =>
+      entryId.isEmpty
+      ? null
+      : Json.list(history['nodes'])
+            .map(Json.map)
+            .where((n) => n['id'] == entryId)
+            .firstOrNull;
+}
+
+Widget _historyFrame(
+  BuildContext context, {
+  required Widget child,
+  bool preview = false,
+}) => Scaffold(
+  appBar: PdBar(
+    title: preview ? '对话预览' : '历史分支',
+    subtitle: preview ? '只读查看，确认后才会切换' : '',
+    toolbarHeight: math.max(
+      PdSize.topBar,
+      MediaQuery.textScalerOf(context).scale(PdFont.title) * 1.5,
+    ),
+  ),
+  body: SafeArea(top: false, child: child),
+);
+
+class _HistoryToolbar extends StatelessWidget {
+  const _HistoryToolbar({this.controller, this.onChanged, this.onLocate});
+  final TextEditingController? controller;
+  final ValueChanged<String>? onChanged;
+  final VoidCallback? onLocate;
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+    child: Row(
+      children: [
+        Expanded(
+          child: TextField(
+            controller: controller,
+            enabled: onChanged != null,
+            style: const TextStyle(fontSize: 14),
+            decoration: const InputDecoration(
+              isDense: true,
+              contentPadding: EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 12,
+              ),
+              prefixIcon: Icon(LucideIcons.search300, size: 20),
+              hintText: '搜索请求或回复',
+            ),
+            onChanged: onChanged,
+          ),
+        ),
+        const SizedBox(width: 4),
+        TextButton(onPressed: onLocate, child: const Text('定位当前')),
+      ],
+    ),
+  );
+}
 
 class _RouteGuide {
   const _RouteGuide(this.depth, this.last, this.active, this.upper);
@@ -95,19 +212,15 @@ class _RoutePainter extends CustomPainter {
 }
 
 /// Browsing is read-only. Only an explicit preview action returns a native target.
-class HistoryPage extends StatefulWidget {
-  const HistoryPage({
-    super.key,
-    required this.history,
-    required this.loadPreview,
-  });
+class _HistoryTreeBody extends StatefulWidget {
+  const _HistoryTreeBody({required this.history, required this.loadPreview});
   final Map<String, dynamic> history;
   final HistoryLoader loadPreview;
   @override
-  State<HistoryPage> createState() => _HistoryPageState();
+  State<_HistoryTreeBody> createState() => _HistoryTreeBodyState();
 }
 
-class _HistoryPageState extends State<HistoryPage> {
+class _HistoryTreeBodyState extends State<_HistoryTreeBody> {
   final _expanded = <String>{'root'};
   final _scroll = ScrollController();
   final _search = TextEditingController();
@@ -231,8 +344,11 @@ class _HistoryPageState extends State<HistoryPage> {
   Future<void> _preview(Map<String, dynamic> turn) async {
     final selected = await Navigator.of(context).push<Map<String, dynamic>>(
       MaterialPageRoute(
-        builder: (_) =>
-            HistoryPreviewPage(turn: turn, loadPreview: widget.loadPreview),
+        builder: (_) => HistoryPreviewPage(
+          turn: turn,
+          expectedLeaf: widget.history['leafId'] as String?,
+          loadPreview: widget.loadPreview,
+        ),
       ),
     );
     if (selected != null && mounted) Navigator.pop(context, selected);
@@ -249,227 +365,218 @@ class _HistoryPageState extends State<HistoryPage> {
   Widget build(BuildContext context) {
     final c = context.pd;
     final rows = _rows;
-    return Scaffold(
-      appBar: PdBar(
-        title: '历史分支',
-        toolbarHeight: math.max(
-          PdSize.topBar,
-          MediaQuery.textScalerOf(context).scale(PdFont.title) * 1.5,
+    return Column(
+      children: [
+        _HistoryToolbar(
+          controller: _search,
+          onChanged: (s) => setState(() => _query = s.trim().toLowerCase()),
+          onLocate: _locate,
         ),
-      ),
-      body: SafeArea(
-        top: false,
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _search,
-                      style: const TextStyle(fontSize: 14),
-                      decoration: const InputDecoration(
-                        isDense: true,
-                        contentPadding: EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 12,
-                        ),
-                        prefixIcon: Icon(LucideIcons.search300, size: 20),
-                        hintText: '搜索请求或回复',
-                      ),
-                      onChanged: (s) =>
-                          setState(() => _query = s.trim().toLowerCase()),
-                    ),
+        Expanded(
+          child: rows.isEmpty
+              ? Center(
+                  child: Text(
+                    widget.history['tree'] == null
+                        ? '请先更新电脑端，才能查看分支树'
+                        : '没有匹配的对话',
                   ),
-                  const SizedBox(width: 4),
-                  TextButton(onPressed: _locate, child: const Text('定位当前')),
-                ],
-              ),
-            ),
-            Expanded(
-              child: rows.isEmpty
-                  ? Center(
-                      child: Text(
-                        widget.history['tree'] == null
-                            ? '请先更新电脑端，才能查看分支树'
-                            : '没有匹配的对话',
+                )
+              : ListView.builder(
+                  controller: _scroll,
+                  itemExtentBuilder: (i, _) => _rowExtent(rows[i]),
+                  itemCount: rows.length,
+                  itemBuilder: (ctx, i) {
+                    final row = rows[i];
+                    final t = row.turn;
+                    final id = Json.str(t['id']);
+                    final children = _children[id] ?? [];
+                    final here = Json.boolean(t['here']);
+                    final expanded =
+                        _query.isNotEmpty || _expanded.contains(id);
+                    final date = DateTime.tryParse(
+                      Json.str(
+                        !expanded && children.isNotEmpty
+                            ? t['latestAt'] ?? t['timestamp']
+                            : t['timestamp'],
                       ),
-                    )
-                  : ListView.builder(
-                      controller: _scroll,
-                      itemExtentBuilder: (i, _) => _rowExtent(rows[i]),
-                      itemCount: rows.length,
-                      itemBuilder: (ctx, i) {
-                        final row = rows[i];
-                        final t = row.turn;
-                        final id = Json.str(t['id']);
-                        final children = _children[id] ?? [];
-                        final here = Json.boolean(t['here']);
-                        final expanded =
-                            _query.isNotEmpty || _expanded.contains(id);
-                        final date = DateTime.tryParse(
-                          Json.str(
-                            !expanded && children.isNotEmpty
-                                ? t['latestAt'] ?? t['timestamp']
-                                : t['timestamp'],
-                          ),
-                        )?.toLocal();
-                        final meta = [
-                          if (date != null)
-                            '${date.month}/${date.day} ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}',
-                          if (children.length > 1) '${children.length} 条后续路线',
-                          if (!expanded && children.isNotEmpty)
-                            '已收起 ${(_counts[id] ?? 1) - 1} 轮',
-                        ].join(' · ');
-                        return Padding(
-                          key: ValueKey('history-turn-$id'),
-                          padding: const EdgeInsets.only(left: 12, right: 8),
-                          child: Row(
-                            children: [
-                              SizedBox(
-                                width: 20 + math.min(row.depth, 5) * 14.0,
-                                height: _rowExtent(row),
-                                child: CustomPaint(
-                                  painter: _RoutePainter(
-                                    row,
-                                    c.accent,
-                                    c.divider,
-                                    c.page,
-                                    expanded && children.isNotEmpty,
-                                  ),
-                                ),
+                    )?.toLocal();
+                    final meta = [
+                      if (date != null)
+                        '${date.month}/${date.day} ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}',
+                      if (children.length > 1) '${children.length} 条后续路线',
+                      if (!expanded && children.isNotEmpty)
+                        '已收起 ${(_counts[id] ?? 1) - 1} 轮',
+                    ].join(' · ');
+                    return Padding(
+                      key: ValueKey('history-turn-$id'),
+                      padding: const EdgeInsets.only(left: 12, right: 8),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 20 + math.min(row.depth, 5) * 14.0,
+                            height: _rowExtent(row),
+                            child: CustomPaint(
+                              painter: _RoutePainter(
+                                row,
+                                c.accent,
+                                c.divider,
+                                c.page,
+                                expanded && children.isNotEmpty,
                               ),
-                              Expanded(
-                                child: Semantics(
-                                  label: here ? '当前所在' : null,
-                                  child: InkWell(
-                                    onTap: () => _preview(t),
+                            ),
+                          ),
+                          Expanded(
+                            child: Semantics(
+                              label: here ? '当前所在' : null,
+                              child: InkWell(
+                                onTap: () => _preview(t),
+                                borderRadius: BorderRadius.circular(10),
+                                child: Container(
+                                  margin: const EdgeInsets.symmetric(
+                                    vertical: 3,
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 7,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: here ? c.accentSoft : c.card,
                                     borderRadius: BorderRadius.circular(10),
-                                    child: Container(
-                                      margin: const EdgeInsets.symmetric(
-                                        vertical: 3,
-                                      ),
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 10,
-                                        vertical: 7,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: here ? c.accentSoft : c.card,
-                                        borderRadius: BorderRadius.circular(10),
-                                        border: Border.all(
-                                          color: here ? c.accent : c.divider,
-                                        ),
-                                      ),
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.center,
-                                        children: [
-                                          Text(
-                                            Json.str(t['text']).isEmpty
-                                                ? '无文字请求'
-                                                : Json.str(t['text']),
-                                            maxLines: 2,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.w600,
-                                              fontSize: 14,
-                                              height: 1.35,
-                                            ),
-                                          ),
-                                          if (_hasSummary(row))
-                                            Text(
-                                              '末条请求：${t['latestText']}',
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
-                                                color: c.text2,
-                                                fontSize: 11,
-                                                height: 1.3,
-                                              ),
-                                            ),
-                                          Row(
-                                            children: [
-                                              if (here) ...[
-                                                Text(
-                                                  '当前所在',
-                                                  style: TextStyle(
-                                                    color: c.accent,
-                                                    fontSize: 11,
-                                                    height: 1.3,
-                                                    fontWeight: FontWeight.w600,
-                                                  ),
-                                                ),
-                                                const SizedBox(width: 6),
-                                              ],
-                                              if (meta.isNotEmpty)
-                                                Expanded(
-                                                  child: Text(
-                                                    meta,
-                                                    maxLines: 1,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                    style: TextStyle(
-                                                      color: c.text2,
-                                                      fontSize: 11,
-                                                      height: 1.3,
-                                                    ),
-                                                  ),
-                                                ),
-                                            ],
-                                          ),
-                                        ],
-                                      ),
+                                    border: Border.all(
+                                      color: here ? c.accent : c.divider,
                                     ),
                                   ),
-                                ),
-                              ),
-                              if (children.isNotEmpty)
-                                IconButton(
-                                  tooltip: expanded ? '收起后续路线' : '展开后续路线',
-                                  onPressed: () => setState(() {
-                                    if (expanded) {
-                                      _expanded.remove(id);
-                                    } else {
-                                      _expanded.add(id);
-                                    }
-                                  }),
-                                  icon: Icon(
-                                    expanded
-                                        ? Icons.expand_less
-                                        : Icons.expand_more,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Text(
+                                        Json.str(t['text']).isEmpty
+                                            ? '无文字请求'
+                                            : Json.str(t['text']),
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w600,
+                                          fontSize: 14,
+                                          height: 1.35,
+                                        ),
+                                      ),
+                                      if (_hasSummary(row))
+                                        Text(
+                                          '末条请求：${t['latestText']}',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: c.text2,
+                                            fontSize: 11,
+                                            height: 1.3,
+                                          ),
+                                        ),
+                                      Row(
+                                        children: [
+                                          if (here) ...[
+                                            Text(
+                                              '当前所在',
+                                              style: TextStyle(
+                                                color: c.accent,
+                                                fontSize: 11,
+                                                height: 1.3,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 6),
+                                          ],
+                                          if (meta.isNotEmpty)
+                                            Expanded(
+                                              child: Text(
+                                                meta,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: TextStyle(
+                                                  color: c.text2,
+                                                  fontSize: 11,
+                                                  height: 1.3,
+                                                ),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                    ],
                                   ),
                                 ),
-                            ],
+                              ),
+                            ),
                           ),
-                        );
-                      },
-                    ),
-            ),
-          ],
+                          if (children.isNotEmpty)
+                            IconButton(
+                              tooltip: expanded ? '收起后续路线' : '展开后续路线',
+                              onPressed: () => setState(() {
+                                if (expanded) {
+                                  _expanded.remove(id);
+                                } else {
+                                  _expanded.add(id);
+                                }
+                              }),
+                              icon: Icon(
+                                expanded
+                                    ? Icons.expand_less
+                                    : Icons.expand_more,
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
         ),
-      ),
+      ],
     );
   }
 }
 
-class HistoryPreviewPage extends StatefulWidget {
+class HistoryPreviewPage extends StatelessWidget {
   const HistoryPreviewPage({
     super.key,
     required this.turn,
     required this.loadPreview,
     this.initialNode,
+    this.expectedLeaf,
   });
   final Map<String, dynamic> turn;
   final HistoryLoader loadPreview;
   final Map<String, dynamic>? initialNode;
+  final String? expectedLeaf;
   @override
-  State<HistoryPreviewPage> createState() => _HistoryPreviewPageState();
+  Widget build(BuildContext context) => _historyFrame(
+    context,
+    preview: true,
+    child: _HistoryPreviewBody(
+      turn: turn,
+      loadPreview: loadPreview,
+      initialNode: initialNode,
+      expectedLeaf: expectedLeaf,
+    ),
+  );
 }
 
-class _HistoryPreviewPageState extends State<HistoryPreviewPage> {
+class _HistoryPreviewBody extends StatefulWidget {
+  const _HistoryPreviewBody({
+    required this.turn,
+    required this.loadPreview,
+    this.initialNode,
+    this.expectedLeaf,
+  });
+  final Map<String, dynamic> turn;
+  final HistoryLoader loadPreview;
+  final Map<String, dynamic>? initialNode;
+  final String? expectedLeaf;
+  @override
+  State<_HistoryPreviewBody> createState() => _HistoryPreviewBodyState();
+}
+
+class _HistoryPreviewBodyState extends State<_HistoryPreviewBody> {
   late Map<String, dynamic> _node;
   final _log = ChatLog('preview');
   List<PdEvent> _events = [];
@@ -532,136 +639,131 @@ class _HistoryPreviewPageState extends State<HistoryPreviewPage> {
     ];
     final here = _node['mode'] != 'edit' && Json.boolean(_node['here']);
     final edit = _node['mode'] == 'edit';
-    return Scaffold(
-      appBar: const PdBar(title: '对话预览', subtitle: '只读查看，确认后才会切换'),
-      body: Column(
-        children: [
-          Padding(
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                Json.str(widget.turn['text']),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              if (choices.isNotEmpty)
+                DropdownButton<String>(
+                  isExpanded: true,
+                  value: Json.str(_node['id']),
+                  items: choices
+                      .map(
+                        (n) => DropdownMenuItem(
+                          value: Json.str(n['id']),
+                          child: Text(
+                            n['mode'] == 'edit'
+                                ? '修改这条请求'
+                                : n['role'] == 'branch'
+                                ? '这条路线最后停留的位置'
+                                : '回复 · ${Json.str(n['text'])}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (id) {
+                    setState(() {
+                      _node = choices.firstWhere((n) => n['id'] == id);
+                      _events = [];
+                      _log.reset([]);
+                    });
+                    _load();
+                  },
+                ),
+              if (_notice.isNotEmpty)
+                Text(_notice, style: TextStyle(color: c.text2, fontSize: 12)),
+            ],
+          ),
+        ),
+        Expanded(
+          child: _error != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(_error!),
+                        TextButton(
+                          onPressed: () => _load(),
+                          child: const Text('重试预览'),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : _loading && _events.isEmpty
+              ? const Center(child: CircularProgressIndicator())
+              : ListView(
+                  children: [
+                    if (_before > 0)
+                      TextButton(
+                        onPressed: _loading ? null : () => _load(earlier: true),
+                        child: const Text('加载更早的对话'),
+                      ),
+                    if (_log.items.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.all(32),
+                        child: Center(child: Text('此位置还没有对话内容')),
+                      ),
+                    for (final item in _log.items) _previewItem(item),
+                  ],
+                ),
+        ),
+        SafeArea(
+          top: false,
+          child: Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  Json.str(widget.turn['text']),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
+                  '原路线会保留；文件修改和已执行的命令不会撤销。',
+                  style: TextStyle(color: c.text2, fontSize: 12),
+                ),
+                const SizedBox(height: 10),
+                FilledButton(
+                  onPressed: _node.isEmpty || here || _loading || _error != null
+                      ? null
+                      : () => Navigator.pop(context, {
+                          ..._node,
+                          if (_node['role'] == 'branch')
+                            'text': widget.turn['text'],
+                          if (_node['role'] != 'branch' &&
+                              _targetText.isNotEmpty)
+                            'text': _targetText,
+                          'inputNotice': _notice,
+                          'expectedLeaf': widget.expectedLeaf,
+                        }),
+                  child: Text(
+                    here
+                        ? '当前所在位置'
+                        : edit
+                        ? '修改并重试'
+                        : _node['id'] == end['id']
+                        ? '切换到此分支'
+                        : '从这里继续',
                   ),
                 ),
-                if (choices.isNotEmpty)
-                  DropdownButton<String>(
-                    isExpanded: true,
-                    value: Json.str(_node['id']),
-                    items: choices
-                        .map(
-                          (n) => DropdownMenuItem(
-                            value: Json.str(n['id']),
-                            child: Text(
-                              n['mode'] == 'edit'
-                                  ? '修改这条请求'
-                                  : n['role'] == 'branch'
-                                  ? '这条路线最后停留的位置'
-                                  : '回复 · ${Json.str(n['text'])}',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: (id) {
-                      setState(() {
-                        _node = choices.firstWhere((n) => n['id'] == id);
-                        _events = [];
-                        _log.reset([]);
-                      });
-                      _load();
-                    },
-                  ),
-                if (_notice.isNotEmpty)
-                  Text(_notice, style: TextStyle(color: c.text2, fontSize: 12)),
               ],
             ),
           ),
-          Expanded(
-            child: _error != null
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(_error!),
-                          TextButton(
-                            onPressed: () => _load(),
-                            child: const Text('重试预览'),
-                          ),
-                        ],
-                      ),
-                    ),
-                  )
-                : _loading && _events.isEmpty
-                ? const Center(child: CircularProgressIndicator())
-                : ListView(
-                    children: [
-                      if (_before > 0)
-                        TextButton(
-                          onPressed: _loading
-                              ? null
-                              : () => _load(earlier: true),
-                          child: const Text('加载更早的对话'),
-                        ),
-                      if (_log.items.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.all(32),
-                          child: Center(child: Text('此位置还没有对话内容')),
-                        ),
-                      for (final item in _log.items) _previewItem(item),
-                    ],
-                  ),
-          ),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    '原路线会保留；文件修改和已执行的命令不会撤销。',
-                    style: TextStyle(color: c.text2, fontSize: 12),
-                  ),
-                  const SizedBox(height: 10),
-                  FilledButton(
-                    onPressed:
-                        _node.isEmpty || here || _loading || _error != null
-                        ? null
-                        : () => Navigator.pop(context, {
-                            ..._node,
-                            if (_node['role'] == 'branch')
-                              'text': widget.turn['text'],
-                            if (_node['role'] != 'branch' &&
-                                _targetText.isNotEmpty)
-                              'text': _targetText,
-                            'inputNotice': _notice,
-                          }),
-                    child: Text(
-                      here
-                          ? '当前所在位置'
-                          : edit
-                          ? '修改并重试'
-                          : _node['id'] == end['id']
-                          ? '切换到此分支'
-                          : '从这里继续',
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 

@@ -146,3 +146,6 @@ superpowers/
 # Python 缓存
 __pycache__/
 *.pyc
+
+# Android 诊断构建报告
+/app/android/build/

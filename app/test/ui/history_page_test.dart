@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'package:pocketdesk/net/api.dart';
+import 'package:pocketdesk/ui/widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pocketdesk/ui/pages/history_page.dart';
@@ -61,6 +64,82 @@ Future<Map<String, dynamic>> preview(String id, int offset) async => {
 };
 
 void main() {
+  Future<void> openHistory(
+    WidgetTester tester,
+    Future<Map<String, dynamic>> Function() load, {
+    void Function(Map<String, dynamic>?)? selected,
+    String entryId = '',
+  }) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                final result = await Navigator.of(context)
+                    .push<Map<String, dynamic>>(
+                      MaterialPageRoute(
+                        builder: (_) => HistoryBrowserPage(
+                          loadHistory: load,
+                          loadPreview: preview,
+                          entryId: entryId,
+                        ),
+                      ),
+                    );
+                selected?.call(result);
+              },
+              child: const Text('打开'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 16));
+  }
+
+  testWidgets('历史页立即打开，慢请求提示可返回，迟到响应不会重新打开页面', (tester) async {
+    final reply = Completer<Map<String, dynamic>>();
+    await openHistory(tester, () => reply.future);
+    expect(find.text('历史分支'), findsOneWidget);
+    expect(find.text('正在读取会话历史…'), findsNothing);
+    await tester.pump(const Duration(seconds: 4));
+    expect(find.text('正在读取会话历史…'), findsOneWidget);
+    await tester.tap(
+      find.byWidgetPredicate((w) => w is PdIconButton && w.tooltip == '返回'),
+    );
+    await tester.pumpAndSettle();
+    reply.complete(fixture());
+    await tester.pumpAndSettle();
+    expect(find.text('历史分支'), findsNothing);
+    expect(find.text('打开'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('加载失败可原地重试，导航携带加载时的叶节点校验值', (tester) async {
+    var calls = 0;
+    Map<String, dynamic>? result;
+    await openHistory(tester, () async {
+      if (++calls == 1) throw ApiException(503, 'offline', '连接暂时中断');
+      return {...fixture(), 'leafId': 'snapshot-leaf'};
+    }, selected: (value) => result = value);
+    await tester.pumpAndSettle();
+    expect(find.text('连接暂时中断'), findsOneWidget);
+    final bar = tester.element(find.byType(PdBar));
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+    expect(calls, 2);
+    expect(identical(bar, tester.element(find.byType(PdBar))), isTrue);
+    await tester.tap(find.text('改成浅色风格'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('切换到此分支'));
+    await tester.pumpAndSettle();
+    expect(result?['expectedLeaf'], 'snapshot-leaf');
+    expect(result?['id'], 'au3');
+    expect(tester.takeException(), isNull);
+  });
+
   Future<void> open(
     WidgetTester tester, {
     void Function(Map<String, dynamic>?)? onSelected,
@@ -85,8 +164,8 @@ void main() {
                 final selected = await Navigator.of(context)
                     .push<Map<String, dynamic>>(
                       MaterialPageRoute(
-                        builder: (_) => HistoryPage(
-                          history: history ?? fixture(),
+                        builder: (_) => HistoryBrowserPage(
+                          loadHistory: () async => history ?? fixture(),
                           loadPreview: preview,
                         ),
                       ),
@@ -102,6 +181,22 @@ void main() {
     await tester.tap(find.text('打开历史'));
     await tester.pumpAndSettle();
   }
+
+  testWidgets('消息入口直接预览，固定页面外壳并返回同一快照的编辑目标', (tester) async {
+    final reply = Completer<Map<String, dynamic>>();
+    Map<String, dynamic>? result;
+    await openHistory(tester, () => reply.future, entryId: 'u1', selected: (value) => result = value);
+    final bar = tester.element(find.byType(PdBar));
+    reply.complete({...fixture(), 'leafId': 'snapshot', 'nodes': [node('u1', '做一个登录页面', user: true)]});
+    await tester.pumpAndSettle();
+    expect(identical(bar, tester.element(find.byType(PdBar))), isTrue);
+    expect(find.text('对话预览'), findsOneWidget);
+    await tester.tap(find.text('修改并重试'));
+    await tester.pumpAndSettle();
+    expect(result?['id'], 'u1');
+    expect(result?['expectedLeaf'], 'snapshot');
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('显示真实分叉，默认展开当前路线，折叠其他路线，当前位置唯一', (tester) async {
     await open(tester);

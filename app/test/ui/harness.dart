@@ -109,6 +109,8 @@ class UiServer {
   final library = <Map<String, dynamic>>[];
   final blobs = <String, List<int>>{};
 
+  Future<http.Response?> Function(http.Request)? intercept;
+
   final calls = <String>[];
   final bodies = <String, Object?>{};
 
@@ -139,6 +141,8 @@ class UiServer {
     final p = req.url.path;
     calls.add('${req.method} $p');
     if (req.body.isNotEmpty) bodies['${req.method} $p'] = req.headers['content-type']?.contains('json') == true ? jsonDecode(req.body) : req.body;
+    final intercepted = await intercept?.call(req);
+    if (intercepted != null) return intercepted;
     if (p.endsWith('/messages') && req.method == 'POST') {
       sent.add((jsonDecode(req.body) as Map).cast<String, dynamic>());
       if (failSends > 0) {

@@ -32,6 +32,7 @@ import '../pick.dart';
 import '../share.dart';
 import '../tokens.dart';
 import '../widgets.dart';
+import '../remote_content.dart';
 import '../file_kinds.dart';
 import '../viewers/fetch.dart';
 import '../viewers/open_file.dart';
@@ -438,36 +439,38 @@ class _ChatPageState extends State<ChatPage> {
     if (_session?.kind != 'pi' || _historyBusy) return;
     setState(() => _historyBusy = true);
     try {
+      Map<String, dynamic>? result;
       if (_pendingHistory != null) {
-        final resume = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(title: const Text('确认上次切换结果'), content: const Text('上次操作的响应未确认。重试会查询同一操作；如果成功，历史消息会替换当前草稿。'), actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('暂不恢复')), FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('确认并恢复'))]));
-        if (resume != true || !mounted) return;
-        final result = await _api.navigateHistory(_id, _pendingHistory!);
-        await _acceptHistory(result);
+        final request = _pendingHistory!;
+        final done = await showDialog<bool>(context: context, barrierDismissible: false, builder: (_) => RemoteConfirmation(
+          title: '确认上次切换结果',
+          content: const Text('上次操作的响应未确认。重试会查询同一操作；如果成功，历史消息会替换当前草稿。'),
+          confirm: '确认并恢复', working: '正在确认结果…',
+          retryable: (e) => !_historyRejected(e),
+          run: () async { result = await _navigateHistory(request); },
+        ));
+        if (done == true && mounted) await _showHistoryResult(result!);
         return;
       }
-      final history = await _api.sessionHistory(_id);
-      await _scope!.sessions.catchUp(_id);
-      if (!mounted) return;
-      Map<String, dynamic>? node;
-      if (entryId.isNotEmpty) {
-        node = Json.list(history['nodes']).map((e) => Json.map(e)).where((e) => e['id'] == entryId).firstOrNull;
-      }
-      Future<Map<String, dynamic>> loadPreview(String target, int before) => _api.historyEntries(_id, target, before: before);
-      if (node != null) {
-        final initial = node;
-        final turn = Json.list(history['tree']).map(Json.map).where((t) => Json.map(t['user'])['id'] == initial['id'] || Json.map(t['end'])['id'] == initial['id'] || Json.list(t['replies']).any((n) => Json.map(n)['id'] == initial['id'])).firstOrNull ?? {'text': initial['text'], 'user': initial['mode'] == 'edit' ? initial : null, 'end': initial['mode'] != 'edit' ? initial : null, 'replies': []};
-        node = await Navigator.of(context).push<Map<String, dynamic>>(MaterialPageRoute(builder: (_) => HistoryPreviewPage(turn: turn, initialNode: initial, loadPreview: loadPreview)));
-      } else {
-        node = await Navigator.of(context).push<Map<String, dynamic>>(MaterialPageRoute(builder: (_) => HistoryPage(history: history, loadPreview: loadPreview)));
-      }
-      if (node == null || !mounted) return;
+      final scope = _scope!;
+      final node = await Navigator.of(context).push<Map<String, dynamic>>(MaterialPageRoute(builder: (_) => HistoryBrowserPage(
+        entryId: entryId,
+        loadHistory: () async {
+          final history = await scope.conn.api.sessionHistory(_id);
+          unawaited(scope.sessions.catchUp(_id));
+          return history;
+        },
+        loadPreview: (target, before) => scope.conn.api.historyEntries(_id, target, before: before),
+      )));
+      if (node == null || !mounted || _scope != scope) return;
       final preview = node;
       final previewText = Json.str(preview['text']);
       final edit = node['mode'] == 'edit';
       final hasDraft = _input.text.isNotEmpty || _pending.isNotEmpty || _historyAttachments.isNotEmpty || _skills.isNotEmpty;
-      final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
-        title: Text(edit ? '回到这条消息之前？' : '切换到这个位置？'),
-        content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+      final request = {'operationId': _clientId(), 'expectedLeaf': node['expectedLeaf'], 'targetId': node['id'], 'mode': node['mode']};
+      final done = await showDialog<bool>(context: context, barrierDismissible: false, builder: (ctx) => RemoteConfirmation(
+        title: edit ? '回到这条消息之前？' : '切换到这个位置？',
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(previewText),
           if (Json.str(preview['inputNotice']).isNotEmpty) Padding(padding: const EdgeInsets.only(top: 12), child: Text(Json.str(preview['inputNotice']))),
           const SizedBox(height: 16),
@@ -475,21 +478,34 @@ class _ChatPageState extends State<ChatPage> {
           const SizedBox(height: 8),
           const Text('已修改的文件和已执行的命令不会撤销。'),
           if (edit && hasDraft) const Padding(padding: EdgeInsets.only(top: 12), child: Text('输入框已有草稿。确认后会用历史消息替换；取消可保留当前草稿。')),
-        ])),
-        actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')), FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(edit && hasDraft ? '替换草稿并回到这里' : '回到这里'))],
+        ]),
+        confirm: edit && hasDraft ? '替换草稿并回到这里' : '回到这里',
+        retryable: (e) => !_historyRejected(e),
+        run: () async { result = await _navigateHistory(request); },
       ));
-      if (ok != true || !mounted) return;
-      final request = {'operationId': _clientId(), 'expectedLeaf': history['leafId'], 'targetId': node['id'], 'mode': node['mode']};
-      _focus.unfocus();
-      _pendingHistory = request;
-      await _saveComposition();
-      final result = await _api.navigateHistory(_id, request);
-      await _acceptHistory(result);
-    } on ApiException catch (e) {
-      if (e.code == 'history_conflict' || e.code == 'history_image_unavailable') { _pendingHistory = null; await _saveComposition(); }
-      if (mounted) toast(context, e.message);
+      if (done == true && mounted) await _showHistoryResult(result!);
     } finally {
       if (mounted) setState(() => _historyBusy = false);
+    }
+  }
+
+  bool _historyRejected(Object e) => e is ApiException &&
+      (e.code == 'history_conflict' || e.code == 'history_image_unavailable');
+
+  Future<Map<String, dynamic>> _navigateHistory(Map<String, dynamic> request) async {
+    _focus.unfocus();
+    _pendingHistory = request;
+    await _saveComposition();
+    try {
+      final result = await _api.navigateHistory(_id, request);
+      await _acceptHistory(result);
+      return result;
+    } on ApiException catch (e) {
+      if (_historyRejected(e)) {
+        _pendingHistory = null;
+        await _saveComposition();
+      }
+      rethrow;
     }
   }
 
@@ -499,7 +515,6 @@ class _ChatPageState extends State<ChatPage> {
     _pendingHistory = null;
     if (Json.boolean(result['cancelled'])) {
       await _saveComposition();
-      if (mounted) toast(context, '历史切换已取消');
       return;
     }
     _draftBranch = Json.str(result['branchId']);
@@ -515,7 +530,11 @@ class _ChatPageState extends State<ChatPage> {
     }
     _retryKey = '';
     await _saveComposition();
+  }
+
+  Future<void> _showHistoryResult(Map<String, dynamic> result) async {
     if (!mounted) return;
+    if (Json.boolean(result['cancelled'])) { toast(context, '历史切换已取消'); return; }
     _focus.requestFocus();
     _toBottom();
     toast(context, result['draft'] != null ? '已回到所选位置，可以修改后发送' : '已切换历史分支');

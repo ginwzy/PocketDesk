@@ -69,7 +69,8 @@ class PdApi {
    * 2、非 2xx 解析 {"code","message"} 抛出 ApiException
    */
   Future<http.Response> send(String method, String path, {Map<String, String>? query, Object? body, Map<String, String>? extra, Duration? wait}) async {
-    final req = http.Request(method, uri(path, query));
+    final abort = Completer<void>();
+    final req = http.AbortableRequest(method, uri(path, query), abortTrigger: abort.future);
     req.headers.addAll(headers(extra));
     if (body is List<int>) {
       req.bodyBytes = body;
@@ -77,12 +78,13 @@ class PdApi {
       req.headers['Content-Type'] = 'application/json';
       req.body = jsonEncode(body);
     }
-    // 1、发送
+    // 1、发送并读取响应，期限覆盖正文
     http.Response res;
     try {
-      res = await http.Response.fromStream(await client.send(req).timeout(wait ?? timeout));
+      res = await client.send(req).then(http.Response.fromStream).timeout(wait ?? timeout);
     } on TimeoutException {
-      throw ApiException(0, 'timeout', '连接电脑超时');
+      abort.complete();
+      throw ApiException(0, 'timeout', '等待电脑响应超时');
     } on SocketException {
       throw ApiException(0, 'offline', '无法连接电脑');
     } on HandshakeException {

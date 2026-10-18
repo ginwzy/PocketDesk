@@ -3,6 +3,7 @@
  */
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -92,4 +93,29 @@ void main() {
     await expectLater(api.historyEntries('s','target'),throwsA(isA<ApiException>().having((e)=>e.code,'code','history_upgrade_required')));
   });
 
+  test('超时覆盖响应体读取，并中止对应请求', () async {
+    final body = StreamController<List<int>>();
+    final aborted = Completer<void>();
+    final api = PdApi(
+      base: base,
+      client: MockClient.streaming((request, _) async {
+        unawaited(
+          (request as http.Abortable).abortTrigger!.then((_) {
+            aborted.complete();
+          }),
+        );
+        return http.StreamedResponse(body.stream, 200);
+      }),
+    );
+    try {
+      await expectLater(
+        api.json('GET', '/probe', wait: const Duration(milliseconds: 20)),
+        throwsA(isA<ApiException>().having((e) => e.code, 'code', 'timeout')),
+      );
+      await aborted.future;
+    } finally {
+      body.add(utf8.encode('{}'));
+      await body.close();
+    }
+  });
 }

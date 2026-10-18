@@ -594,3 +594,29 @@ body.pd-resizing { cursor: col-resize; user-select: none; }
 .pd-history-branch.ends-route .pd-history-rail::before { bottom: 50%; }
 
 .pd-history-last { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+/* Remote destinations appear immediately; only their content waits. */
+.pd-skeleton { visibility: hidden; padding: 4px 0; }
+.pd-remote-load.visible .pd-skeleton { visibility: visible; animation: pd-breathe 1.1s ease-in-out infinite alternate; }
+.pd-skeleton-row { height: 52px; display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+.pd-skeleton-row i { display: block; width: 70%; height: 12px; border-radius: 4px; background: var(--pd-line); }
+.pd-skeleton-row:nth-child(even) i { width: 50%; }
+.pd-skeleton-row i:last-child { width: 30%; height: 8px; }
+.pd-skeleton.tree .pd-skeleton-row { height: 76px; border-left: 2px solid var(--pd-line); padding-left: 18px; }
+.pd-remote-notice { min-height: 24px; color: var(--pd-text-2); font-size: 12px; }
+.pd-remote-load.failed .pd-skeleton, .pd-remote-load.failed .pd-remote-notice { display: none; }
+.pd-remote-error { padding: 20px 0; }
+.pd-history-loading { min-height: min(72vh, 760px); padding: 16px; }
+.pd-history-loading .pd-skeleton, .pd-history-loading .pd-history-toolbar { width: 38%; }
+.pd-action-error { color: var(--pd-danger); }
+.pd-action-progress { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; white-space: nowrap; }
+.pd-pick-row .pd-action-progress { font-size: 12px; flex-shrink: 0; }
+.pd-wait-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; vertical-align: middle; animation: pd-wait-turn .8s linear infinite; }
+.pd-remote-ready { animation: pd-remote-fade .12s ease-out; }
+@keyframes pd-breathe { from { opacity: .45; } to { opacity: 1; } }
+@keyframes pd-wait-turn { to { transform: rotate(360deg); } }
+@keyframes pd-remote-fade { from { opacity: .5; } to { opacity: 1; } }
+@media (max-width: 700px) { .pd-history-loading .pd-skeleton, .pd-history-loading .pd-history-toolbar { width: 100%; } }
+@media (prefers-reduced-motion: reduce) {
+  .pd-remote-load.visible .pd-skeleton, .pd-wait-spinner, .pd-remote-ready { animation: none; }
+}

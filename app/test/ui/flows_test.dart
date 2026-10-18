@@ -3,6 +3,8 @@
  */
 library;
 
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -10,6 +12,7 @@ import 'package:fast_gbk/fast_gbk.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_math_fork/flutter_math.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:pocketdesk/net/events.dart' show LinkState;
 import 'package:pocketdesk/core/discovery.dart';
 import 'package:pocketdesk/data/models.dart';
@@ -48,6 +51,85 @@ void main() {
     await settle(tester);
     await tester.pumpWidget(const SizedBox());
     await tester.runAsync(env.dispose);
+  }
+
+  testWidgets('真实模型入口先完成手动输入，再提交并更新会话', (tester) async {
+    final reply = Completer<http.Response>();
+    var writes = 0;
+    final env = await start(tester, page: const ChatPage(sessionId: 'cc'), setup: (server) {
+      server.sessions.first['state'] = 'idle';
+      server.intercept = (request) async {
+        if (request.method == 'PATCH' && request.url.path == '/api/sessions/cc') {
+          writes++;
+          return reply.future;
+        }
+        return null;
+      };
+    });
+    await tester.enterText(find.byType(TextField).last, '/model');
+    await tester.pump();
+    await tester.tap(find.text('发送'));
+    await settle(tester);
+    await tester.tap(find.text('手动填写…'));
+    await settle(tester);
+    expect(writes, 0);
+    expect(find.text('正在切换…', skipOffstage: false), findsNothing);
+    await tester.tap(find.text('取消'));
+    await settle(tester);
+    expect(find.text('切换模型'), findsOneWidget);
+    await tester.tap(find.text('手动填写…'));
+    await settle(tester);
+    await tester.enterText(find.descendant(of: find.byType(AlertDialog), matching: find.byType(TextField)), 'fixture/custom');
+    await tester.tap(find.text('确定'));
+    await settle(tester);
+    expect(writes, 1);
+    expect(find.text('正在切换…'), findsOneWidget);
+    expect(env.app.scope!.sessions.byId('cc')!.model, 'sonnet');
+    expect(env.server.bodies['PATCH /api/sessions/cc'], {'model': 'fixture/custom'});
+    reply.complete(http.Response(jsonEncode({...env.server.sessions.first, 'model': 'fixture/custom'}), 200, headers: {'content-type': 'application/json; charset=utf-8'}));
+    await settle(tester);
+    expect(env.app.scope!.sessions.byId('cc')!.model, 'fixture/custom');
+    expect(find.text('切换模型'), findsNothing);
+    await finish(tester, env);
+  });
+
+  for (final code in ['history_conflict', 'history_image_unavailable']) {
+    testWidgets('历史明确拒绝 $code 后清除持久化操作并允许重新选点', (tester) async {
+      setSize(tester, const Size(390, 844));
+      final env = (await tester.runAsync(() => UiEnv.create(setup: (server) {
+        server.sessions.firstWhere((s) => s['id'] == 'pi')['state'] = 'idle';
+        server.intercept = (request) async {
+          if (request.url.path.endsWith('/history/navigate')) {
+            return http.Response(jsonEncode({'code': code, 'message': '请选择其他位置'}), code == 'history_conflict' ? 409 : 422, headers: {'content-type': 'application/json; charset=utf-8'});
+          }
+          if (request.url.path.endsWith('/history')) return http.Response(jsonEncode({'leafId': 'leaf', 'nodes': [], 'tree': []}), 200);
+          return null;
+        };
+      })))!;
+      final operation = {'operationId': 'same-operation', 'targetId': 'target', 'expectedLeaf': 'leaf', 'mode': 'edit'};
+      await tester.runAsync(() => env.db.saveHistoryDraft('h1', 'pi', {'operation': operation}));
+      await tester.pumpWidget(pageHost(env, const ChatPage(sessionId: 'pi')));
+      await settle(tester);
+      await tester.enterText(find.byType(TextField).last, '/tree');
+      await tester.pump();
+    await tester.tap(find.text('发送'));
+      await settle(tester);
+      await tester.tap(find.text('确认并恢复'));
+      await settle(tester);
+      expect(env.server.bodies['POST /api/sessions/pi/history/navigate'], operation);
+      expect(tester.widget<FilledButton>(find.widgetWithText(FilledButton, '重试同一操作')).onPressed, isNull);
+      final draft = (await tester.runAsync(() => env.db.historyDraft('h1', 'pi')))!;
+      expect(draft['operation'], isNull);
+      await tester.tap(find.text('返回').last);
+      await settle(tester);
+      await tester.enterText(find.byType(TextField).last, '/tree');
+      await tester.pump();
+    await tester.tap(find.text('发送'));
+      await settle(tester);
+      expect(find.text('历史分支'), findsOneWidget);
+      expect(find.text('确认上次切换结果'), findsNothing);
+      await finish(tester, env);
+    });
   }
 
   testWidgets('开启身份验证时先验证再显示内容', (tester) async {

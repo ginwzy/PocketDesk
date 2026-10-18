@@ -648,7 +648,7 @@
   }
 
   function pickFolder(then) {
-    c.api('POST', '/admin/api/pick-folder', { prompt: '选择工作目录' }).then(function (r) {
+    c.api('POST', '/admin/api/pick-folder', { prompt: '选择工作目录' }, 300000).then(function (r) {
       if (!r.path) { return; }
       c.api('GET', P + '/api/ws').then(function (list) {
         list = list || [];

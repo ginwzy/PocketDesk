@@ -30,8 +30,11 @@
   }
 
   /** api：调用接口，失败时抛出带提示文字的错误 */
-  function api(method, path, body) {
+  function api(method, path, body, wait) {
+    var controller = new AbortController(), expired = false;
+    var timer = setTimeout(function () { expired = true; controller.abort(); }, wait === undefined ? 60000 : wait);
     return fetch(path, {
+      signal: controller.signal,
       method: method,
       headers: body ? { 'Content-Type': 'application/json' } : {},
       body: body ? JSON.stringify(body) : undefined,
@@ -43,7 +46,10 @@
         if (!res.ok) { var err = new Error((data && data.message) || '操作失败'); err.code = data && data.code; err.status = res.status; throw err; }
         return data;
       });
-    });
+    }).catch(function (error) {
+      if (expired) { var timeout = new Error('等待电脑响应超时，请重试或确认操作结果'); timeout.code = 'timeout'; throw timeout; }
+      throw error;
+    }).finally(function () { clearTimeout(timer); });
   }
 
   /** uploadForm：以表单上传文件 */
@@ -1106,18 +1112,29 @@
     if (!s || historyBusy[s.id]) { return; }
     if (s.kind !== 'pi') { toast('历史分支当前仅支持 Pi 会话'); return; }
     if (historyRequests[s.id]) {
-      confirmBox('确认上次切换结果', '上次操作的响应未确认。重试会查询同一操作；如果成功，历史消息会替换当前草稿。', '确认并恢复', function () {
+      var request = historyRequests[s.id];
+      modal('确认上次切换结果', '<p>上次操作的响应未确认。重试会查询同一操作；如果成功，历史消息会替换当前草稿。</p>', '<button class="pd-btn" data-act="modal-close">取消</button><button class="pd-btn pd-btn-primary" id="history-resume">确认并恢复</button>');
+      document.getElementById('history-resume').onclick = function () {
         historyBusy[s.id] = true;
-        api('POST', P + '/api/sessions/' + encodeURIComponent(s.id) + '/history/navigate', historyRequests[s.id]).then(function (result) { return acceptHistory(s, result); }).catch(function (e) { if (historyRejected(e)) { delete historyRequests[s.id]; save('pd.historyRequests', historyRequests); } toast(e.message); }).finally(function () { delete historyBusy[s.id]; });
-      }); return;
+        modalAction(this, function () { return api('POST', P + '/api/sessions/' + encodeURIComponent(s.id) + '/history/navigate', request, 50000); },
+          function (result) { return acceptHistory(s, result); }, function (e, button) { historyFailure(s, e, button); }).then(function (result) { if (result) { showHistoryResult(s, result); } }).finally(function () { delete historyBusy[s.id]; });
+      }; return;
     }
-    historyBusy[s.id] = true;
-    api('GET', P + '/api/sessions/' + encodeURIComponent(s.id) + '/history').then(function (view) {
-      return refreshHistoryLog(s.id).then(function () {
-        showHistoryTree(s, view, entryId);
+    remoteModal('历史分支', '正在读取会话历史…', function () {
+      return api('GET', P + '/api/sessions/' + encodeURIComponent(s.id) + '/history', undefined, 45000).then(function (view) {
+        refreshHistoryLog(s.id).catch(function (e) { console.warn('历史已读取，聊天同步失败', e); });
+        return view;
       });
-    }).catch(function (e) { toast(e.message); }).finally(function () { delete historyBusy[s.id]; });
+    }, function (view) { showHistoryTree(s, view, entryId); }, true);
   }
+  function historyFailure(s, e, button) {
+    button.textContent = historyRejected(e) ? '刷新历史' : '重试同一操作';
+    if (historyRejected(e)) {
+      delete historyRequests[s.id]; save('pd.historyRequests', historyRequests);
+      button.onclick = function () { openHistory(s); };
+    }
+  }
+
   function showHistoryTree(s, view, entryId) {
     var turns = view.tree || [], byId = {}, children = {}, expanded = { root: true }, counts = {}, selected, generation = 0, shown = 80;
     turns.forEach(function (t) { byId[t.id] = t; (children[t.parentId || ''] || (children[t.parentId || ''] = [])).push(t); if (t.current) { expanded[t.id] = true; } });
@@ -1184,8 +1201,8 @@
         var targetId = node.id;
         var mine = ++generation, cursor = earlier ? before : -1;
         action.disabled = true; action.textContent = '正在加载预览…';
-        if (!earlier) { conversation.innerHTML = '<p class="pd-muted" role="status">正在加载这条路线的对话…</p>'; }
-        api('GET', P + '/api/sessions/' + encodeURIComponent(s.id) + '/history/entries?targetId=' + encodeURIComponent(targetId) + '&before=' + cursor + '&limit=50').then(function (page) {
+        if (!earlier) { conversation.innerHTML = '<p class="pd-muted" role="status"><span class="pd-wait-spinner" aria-hidden="true"></span> 正在加载这条路线的对话…</p>'; }
+        api('GET', P + '/api/sessions/' + encodeURIComponent(s.id) + '/history/entries?targetId=' + encodeURIComponent(targetId) + '&before=' + cursor + '&limit=50', undefined, 45000).then(function (page) {
           if (mine !== generation || !conversation.isConnected) { return; }
           if (page.before === undefined) { throw new Error('请更新电脑端后再预览历史'); }
           events = earlier ? (page.events || []).concat(events) : page.events || [];
@@ -1235,33 +1252,38 @@
     if (back) { document.getElementById('history-back').onclick = back; }
     var request = { operationId: 'history-' + Date.now() + '-' + Math.random().toString(36).slice(2), expectedLeaf: view.leafId, targetId: node.id, mode: node.mode };
     document.getElementById('history-confirm').onclick = function () {
-      var button = this; button.disabled = true; button.textContent = '正在切换…'; historyBusy[s.id] = true;
+      historyBusy[s.id] = true;
       historyRequests[s.id] = request; save('pd.historyRequests', historyRequests);
-      api('POST', P + '/api/sessions/' + encodeURIComponent(s.id) + '/history/navigate', request).then(function (result) {
-        closeModal(); return acceptHistory(s, result);
-      }).catch(function (e) { if (historyRejected(e)) { delete historyRequests[s.id]; save('pd.historyRequests', historyRequests); } toast(e.message); button.disabled = false; button.textContent = historyRejected(e) ? '刷新历史' : '重试同一操作'; if (historyRejected(e)) { button.onclick = function () { openHistory(s); }; } }).finally(function () { delete historyBusy[s.id]; });
+      modalAction(this, function () { return api('POST', P + '/api/sessions/' + encodeURIComponent(s.id) + '/history/navigate', request, 50000); },
+        function (result) { return acceptHistory(s, result); }, function (e, button) { historyFailure(s, e, button); }).then(function (result) { if (result) { showHistoryResult(s, result); } }).finally(function () { delete historyBusy[s.id]; });
     };
   }
 
   function acceptHistory(s, result) {
     delete historyRequests[s.id]; save('pd.historyRequests', historyRequests);
-    if (result.cancelled) { toast('历史切换已取消'); return refreshHistoryLog(s.id); }
+    if (result.cancelled) { return refreshHistoryLog(s.id).then(function () { return result; }); }
     draftBranches[s.id] = result.branchId || ''; save('pd.draftBranches', draftBranches);
     if (result.draft) {
       saveDraft(s.id, result.draft.text || '');
       historyCompositions[s.id] = { attachments: result.draft.attachments || [], skills: result.draft.skills || [] };
       save('pd.historyCompositions', historyCompositions);
       if (route().sid === s.id) {
-        var input = document.getElementById('input'); if (input) { input.value = result.draft.text || ''; input.focus(); }
+        var input = document.getElementById('input'); if (input) { input.value = result.draft.text || ''; }
         pending = (result.draft.attachments || []).map(function (path) { return { name: path.split('/').pop(), path: path }; });
         chosenSkills[s.id] = result.draft.skills || []; renderPending(); renderChosen(); syncSend();
       }
     }
+    return refreshHistoryLog(s.id).then(function () { return result; });
+  }
+
+  function showHistoryResult(s, result) {
+    if (route().sid !== s.id) { return; }
+    if (result.cancelled) { toast('历史切换已取消'); return; }
+    var input = document.getElementById('input'); if (input) { input.focus(); }
     toast(result.draft ? '已回到所选位置，可以修改后发送' : '已切换历史分支');
     if (result.draftWarnings && result.draftWarnings.length) {
       modal('部分历史附件不可用', '<p>' + result.draftWarnings.map(esc).join('<br>') + '</p><p>附件引用仍保留在草稿中，请移除不可用附件或重新附加文件。</p>', '<button class="pd-btn pd-btn-primary" data-act="modal-close">知道了</button>');
     }
-    return refreshHistoryLog(s.id);
   }
 
   function saveDraft(id, text) {
@@ -1455,23 +1477,23 @@
       renderList();
       if (done) { toast(done); }
       return s2;
-    }).catch(function (er) { toast(er.message); });
+    });
   }
 
   /** chooseModel：切换模型（列表来自 Agent 或所选供应商） */
   function chooseModel(s) {
-    api('GET', P + '/api/agents/' + s.kind + '/models' + (s.provider ? '?provider=' + encodeURIComponent(s.provider) : '')).then(function (list) {
+    remoteModal('切换模型', '正在获取模型列表…', function () { return api('GET', P + '/api/agents/' + s.kind + '/models' + (s.provider ? '?provider=' + encodeURIComponent(s.provider) : '')); }, function (list) {
       list = list || [];
       modal('切换模型', (list.length ? '<div class="pd-pick-list">' + list.map(function (m) {
-        return '<button class="pd-pick-row' + (m === s.model ? ' active' : '') + '" data-act="model-pick" data-model="' + esc(m) + '">' + icon(m === s.model ? 'check' : 'cpu', 16) + '<span class="pd-mono">' + esc(m) + '</span></button>';
+        return '<button class="pd-pick-row' + (m === s.model ? ' active' : '') + '" data-act="model-pick" data-sid="' + esc(s.id) + '" data-model="' + esc(m) + '">' + icon(m === s.model ? 'check' : 'cpu', 16) + '<span class="pd-mono">' + esc(m) + '</span></button>';
       }).join('') + '</div>' : '<div class="pd-muted">没有查到可选模型，可以直接填写</div>') +
         '<div class="pd-field" style="margin-top:10px"><label for="model-custom">其他模型</label><input class="pd-input pd-mono" id="model-custom" placeholder="填写模型名称" value=""></div>',
-        (s.model ? '<button class="pd-btn" data-act="model-pick" data-model="">恢复默认</button>' : '') + '<button class="pd-btn" data-act="modal-close">取消</button><button class="pd-btn pd-btn-primary" data-act="model-custom">使用</button>');
-    }).catch(function (er) { toast(er.message); });
+        (s.model ? '<button class="pd-btn" data-act="model-pick" data-sid="' + esc(s.id) + '" data-model="">恢复默认</button>' : '') + '<button class="pd-btn" data-act="modal-close">取消</button><button class="pd-btn pd-btn-primary" data-act="model-custom" data-sid="' + esc(s.id) + '">使用</button>');
+    });
   }
 
   function effortRequest(method, s, level) {
-    return api(method, P + '/api/sessions/' + encodeURIComponent(s.id) + '/effort', method === 'PUT' ? { level: level } : undefined).catch(function (er) {
+    return api(method, P + '/api/sessions/' + encodeURIComponent(s.id) + '/effort', method === 'PUT' ? { level: level } : undefined, 30000).catch(function (er) {
       if ((er.status === 404 && !er.code) || er.status === 405) { er.message = '电脑端尚不支持 /effort，请更新电脑端'; }
       throw er;
     });
@@ -1481,7 +1503,7 @@
   function chooseEffort(s, arg) {
     if (!s || s.kind !== 'pi') { toast('/effort 当前仅支持 Pi 会话'); return; }
     if (arg && arg.trim()) { setEffort(s, arg.trim().toLowerCase()); return; }
-    effortRequest('GET', s).then(function (info) {
+    remoteModal('思考强度', '正在读取可用思考强度…', function () { return effortRequest('GET', s); }, function (info) {
       Object.assign(s, info.session);
       var setting = info.override === 'default' ? '跟随 Pi 配置' : (info.override || '沿用 Pi 会话');
       var rows = [{ value: 'default', label: '跟随 Pi 配置', note: '清除本会话的强度覆盖', selected: info.override === 'default' }].concat((info.levels || []).map(function (v) {
@@ -1492,34 +1514,38 @@
           return '<button class="pd-pick-row" data-act="effort-pick" data-sid="' + esc(s.id) + '" data-level="' + esc(r.value) + '">' + icon(r.selected ? 'check' : 'cpu', 16) +
             '<span><span>' + esc(r.label) + '</span>' + (r.note ? '<span class="pd-muted" style="display:block;font-size:12px">' + esc(r.note) + '</span>' : '') + '</span></button>';
         }).join('') + '</div>', '<button class="pd-btn" data-act="modal-close">取消</button>');
-    }).catch(function (er) { toast(er.message); });
+    });
   }
 
   var effortPending = {};
   function setEffort(s, level) {
     if (!s || effortPending[s.id]) { return; }
     effortPending[s.id] = true;
-    effortRequest('PUT', s, level).then(function (info) {
-      Object.assign(s, info.session);
-      closeModal();
-      renderHead();
+    var button = modalRoot.querySelector('[data-act="effort-pick"][data-level="' + CSS.escape(level) + '"]');
+    if (!button) {
+      modal('调整思考强度', '<p>' + esc(level) + '</p>', '<button class="pd-btn pd-btn-primary" id="effort-apply">重试</button>');
+      button = document.getElementById('effort-apply');
+      button.onclick = function () { setEffort(s, level); };
+    }
+    modalAction(button, function () { return effortRequest('PUT', s, level); }, function (info) {
+      Object.assign(s, info.session); renderHead();
       toast((level === 'default' ? '已跟随 Pi 配置，当前为 ' : '实际思考强度：') + info.level);
-    }).catch(function (er) { toast(er.message); }).finally(function () { delete effortPending[s.id]; });
+    }).finally(function () { delete effortPending[s.id]; });
   }
 
   /** chooseProvider：切换模型供应商（CC Switch 中的供应商，只影响这个会话） */
   function chooseProvider(s) {
     if (s.kind !== 'claude' && s.kind !== 'codex') { toast('只有 Claude Code 与 Codex 可以切换供应商'); return; }
-    api('GET', P + '/api/agents/' + s.kind + '/providers').then(function (r) {
-      if (!r.available) { toast('电脑上没有找到 CC Switch'); return; }
+    remoteModal('模型供应商', '正在读取模型供应商…', function () { return api('GET', P + '/api/agents/' + s.kind + '/providers'); }, function (r) {
+      if (!r.available) { throw new Error('电脑上没有找到 CC Switch'); }
       var cur = (r.list || []).filter(function (p) { return p.current; })[0];
       var rows = [{ id: '', name: '跟随电脑当前设置', host: cur ? '当前：' + cur.name : '' }].concat(r.list || []);
       modal('模型供应商', '<div class="pd-muted" style="font-size:12px;margin-bottom:8px">只对这个会话生效，不影响电脑上的其他会话</div><div class="pd-pick-list">' + rows.map(function (p) {
         var on = (s.provider || '') === p.id;
-        return '<button class="pd-pick-row' + (on ? ' active' : '') + '" data-act="provider-pick" data-id="' + esc(p.id) + '">' + icon(on ? 'check' : 'server', 16) +
+        return '<button class="pd-pick-row' + (on ? ' active' : '') + '" data-act="provider-pick" data-sid="' + esc(s.id) + '" data-id="' + esc(p.id) + '">' + icon(on ? 'check' : 'server', 16) +
           '<span style="flex:1;min-width:0"><div>' + esc(p.name) + (p.current ? ' <span class="pd-muted" style="font-size:12px">电脑当前</span>' : '') + '</div>' + (p.host ? '<div class="pd-path">' + esc(p.host) + '</div>' : '') + '</span></button>';
       }).join('') + '</div>', '<button class="pd-btn" data-act="modal-close">关闭</button>');
-    }).catch(function (er) { toast(er.message); });
+    });
   }
 
   /** skillsModal：skill 列表；开关控制是否启用，勾选后随下一条消息使用，点名称查看说明 */
@@ -1815,7 +1841,7 @@
         return;
       }
       toast('正在从手机取文件…');
-      api('POST', '/admin/api/phone/' + encodeURIComponent(ph.dev) + '/fetch', { path: p, open: true }).catch(function (er) { toast(er.message); });
+      api('POST', '/admin/api/phone/' + encodeURIComponent(ph.dev) + '/fetch', { path: p, open: true }, 300000).catch(function (er) { toast(er.message); });
       return;
     }
     fetch(fsUrl(p), { credentials: 'same-origin' }).then(function (res) {
@@ -2048,6 +2074,60 @@
     if (route().page === 'pair') { location.hash = 'settings/devices'; } else { closeModal(); }
   }
 
+  // Keep the loading surface alive from the initial click. Its DOM identity
+  // prevents late requests from reopening a closed or replaced dialog.
+  function remoteModal(title, message, loadData, render, tree) {
+    modal(title, '<div class="pd-remote-load" aria-busy="true"><div class="pd-skeleton' + (tree ? ' tree' : '') + '">' + Array.from({ length: tree ? 6 : 5 }, function () { return '<div class="pd-skeleton-row"><i></i><i></i></div>'; }).join('') + '</div><div class="pd-remote-notice" role="status"></div></div>', '<button class="pd-btn" data-act="modal-close">关闭</button>');
+    var holder = modalRoot.querySelector('.pd-remote-load'), sid = route().sid;
+    if (tree) { holder.classList.add('pd-history-loading'); modalRoot.querySelector('.pd-dialog').classList.add('pd-history-dialog'); holder.insertAdjacentHTML('afterbegin', '<div class="pd-history-toolbar"><input class="pd-input" placeholder="搜索请求或回复" disabled><button class="pd-btn" disabled>定位当前</button></div>'); }
+    function active() { return holder.isConnected && route().sid === sid; }
+    function run() {
+      holder.setAttribute('aria-busy', 'true'); holder.classList.remove('failed', 'visible');
+      var error = holder.querySelector('.pd-remote-error'); if (error) { error.remove(); }
+      var notice = holder.querySelector('.pd-remote-notice'); notice.textContent = '';
+      var delay = setTimeout(function () { if (active()) { holder.classList.add('visible'); } }, 150);
+      var slow = setTimeout(function () { if (active()) { notice.textContent = message; } }, 3000);
+      Promise.resolve().then(loadData).then(function (data) { if (active()) { render(data); var ready = modalRoot.querySelector('.pd-dialog'); if (ready) { ready.style.animation = 'none'; ready.querySelector('.pd-modal-body').classList.add('pd-remote-ready'); } } }).catch(function (e) {
+        if (!active()) { return; }
+        holder.classList.add('failed');
+        var block = document.createElement('div'); block.className = 'pd-remote-error';
+        block.innerHTML = '<p>' + esc(e.message || '加载失败，请重试') + '</p><button class="pd-btn">重试</button>';
+        block.querySelector('button').onclick = run; holder.appendChild(block);
+      }).finally(function () { clearTimeout(delay); clearTimeout(slow); if (holder.isConnected) { holder.setAttribute('aria-busy', 'false'); } });
+    }
+    run();
+  }
+
+  function modalAction(button, request, success, failure) {
+    var dialog = button.closest('.pd-dialog');
+    if (!dialog || dialog.dataset.busy) { return Promise.resolve(); }
+    dialog.dataset.busy = 'true'; dialog.setAttribute('aria-busy', 'true');
+    var controls = Array.from(dialog.querySelectorAll('button,input')).map(function (el) { return { el: el, disabled: el.disabled }; });
+    controls.forEach(function (c) { c.el.disabled = true; });
+    // Disabled controls must not move keyboard focus back into the chat.
+    dialog.tabIndex = -1; dialog.focus({ preventScroll: true });
+    function holdFocus(event) { if (event.key === 'Tab') { event.preventDefault(); } }
+    dialog.addEventListener('keydown', holdFocus);
+    var original = button.innerHTML;
+    button.innerHTML = (button.classList.contains('pd-pick-row') ? original : '') + '<span class="pd-action-progress"><span class="pd-wait-spinner" aria-hidden="true"></span> 正在切换…</span>';
+    var previous = dialog.querySelector('.pd-action-error'); if (previous) { previous.remove(); }
+    function release() {
+      delete dialog.dataset.busy; dialog.setAttribute('aria-busy', 'false');
+      controls.forEach(function (c) { c.el.disabled = c.disabled; }); button.innerHTML = original;
+      dialog.removeEventListener('keydown', holdFocus);
+      if (dialog.isConnected) { button.focus({ preventScroll: true }); }
+    }
+    return Promise.resolve().then(request).then(function (result) { return success ? success(result) : result; }).then(function (result) {
+      release(); if (dialog.isConnected) { closeModal(); }
+      return result;
+    }).catch(function (e) {
+      release(); if (!dialog.isConnected) { return; }
+      var error = document.createElement('p'); error.className = 'pd-action-error'; error.setAttribute('role', 'alert'); error.textContent = e.message || '操作失败，请重试';
+      dialog.querySelector('.pd-modal-body').appendChild(error);
+      if (failure) { failure(e, button); }
+    });
+  }
+
   /* ---------- 弹窗 ---------- */
   function modal(t, body, foot) {
     modalRoot.innerHTML = '<div class="pd-scrim"><div class="pd-dialog" role="dialog" aria-modal="true" aria-label="' + esc(t) + '">' +
@@ -2056,7 +2136,7 @@
     var first = modalRoot.querySelector('input,button.pd-btn-primary');
     if (first) { first.focus(); }
   }
-  function closeModal() { modalRoot.innerHTML = ''; }
+  function closeModal() { if (modalRoot.querySelector('.pd-dialog[data-busy]')) { return; } modalRoot.innerHTML = ''; }
   function confirmBox(t, text, okLabel, onOk) {
     modal(t, '<div>' + text + '</div>', '<button class="pd-btn" data-act="modal-close">取消</button><button class="pd-btn pd-btn-danger" id="confirm-ok">' + okLabel + '</button>');
     document.getElementById('confirm-ok').onclick = function () { closeModal(); onOk(); };
@@ -2223,26 +2303,23 @@
       case 'head-skills': skillsModal(session(sid)); break;
       case 'head-mute':
         var su = session(sid);
-        if (su) { patchSession(su, { muted: !su.muted }, su.muted ? '已打开提醒' : '已关闭提醒'); }
+        if (su) { patchSession(su, { muted: !su.muted }, su.muted ? '已打开提醒' : '已关闭提醒').catch(function (e) { toast(e.message); }); }
         break;
       case 'effort-pick':
         setEffort(session(t.dataset.sid), t.dataset.level);
         break;
       case 'model-pick':
-        closeModal();
-        patchSession(session(sid), { model: t.dataset.model }, t.dataset.model ? '已切换到 ' + t.dataset.model : '已恢复默认模型');
+        modalAction(t, function () { return patchSession(session(t.dataset.sid || sid), { model: t.dataset.model }, null); }, function () { toast(t.dataset.model ? '已切换到 ' + t.dataset.model : '已恢复默认模型'); });
         break;
       case 'model-custom':
         var mc = document.getElementById('model-custom').value.trim();
         if (!mc) { toast('请填写模型名称'); break; }
-        closeModal();
-        patchSession(session(sid), { model: mc }, '已切换到 ' + mc);
+        modalAction(t, function () { return patchSession(session(t.dataset.sid || sid), { model: mc }, null); }, function () { toast('已切换到 ' + mc); });
         break;
       case 'provider-pick':
-        closeModal();
         var pv = t.querySelector('div');
         if (id) { providerNames[id] = pv ? pv.firstChild.textContent.trim() : ''; }
-        patchSession(session(sid), { provider: id || '' }, id ? '已切换供应商' : '已改为跟随电脑当前设置');
+        modalAction(t, function () { return patchSession(session(t.dataset.sid || sid), { provider: id || '' }, null); }, function () { toast(id ? '已切换供应商' : '已改为跟随电脑当前设置'); });
         break;
       case 'skill-view':
         var sv = session(sid), kv = skillList.filter(function (x) { return x.path === t.dataset.path; })[0];
@@ -2343,7 +2420,7 @@
         break;
       case 'phone-fetch':
         toast('正在从手机取文件…');
-        api('POST', '/admin/api/phone/' + encodeURIComponent(ph.dev) + '/fetch', { path: t.dataset.path }).then(function (r) { toast('已存到 ' + r.path); }).catch(function (er) { toast(er.message); });
+        api('POST', '/admin/api/phone/' + encodeURIComponent(ph.dev) + '/fetch', { path: t.dataset.path }, 300000).then(function (r) { toast('已存到 ' + r.path); }).catch(function (er) { toast(er.message); });
         break;
       case 'fs-mkdir':
         modal('新建文件夹', '<div class="pd-field"><label for="mkname">名称</label><input class="pd-input" id="mkname"></div>',
@@ -2382,7 +2459,7 @@
       // 设置
       case 'theme': save('pd.theme', t.dataset.theme); applyTheme(); renderMain(); break;
       case 'pick-folder':
-        api('POST', '/admin/api/pick-folder', { prompt: t.dataset.prompt }).then(function (r) {
+        api('POST', '/admin/api/pick-folder', { prompt: t.dataset.prompt }, 300000).then(function (r) {
           if (!r.path) { return; }
           var input = document.getElementById(t.dataset.target);
           if (input) { input.value = r.path; }
@@ -2483,7 +2560,7 @@
     var s = session(sid);
     if (k === 'copy-all') { copyText(chatText(sid)); }
     if (k === 'delete') { deleteSession(sid); }
-    if (k === 'mute' && s) { patchSession(s, { muted: !s.muted }, s.muted ? '已打开提醒' : '已关闭提醒'); }
+    if (k === 'mute' && s) { patchSession(s, { muted: !s.muted }, s.muted ? '已打开提醒' : '已关闭提醒').catch(function (e) { toast(e.message); }); }
     if (k === 'pin' && s) {
       api('PATCH', P + '/api/sessions/' + encodeURIComponent(sid), { pinned: !s.pinned }).then(function (s2) { s.pinned = s2.pinned; renderList(); }).catch(function (er) { toast(er.message); });
     }
