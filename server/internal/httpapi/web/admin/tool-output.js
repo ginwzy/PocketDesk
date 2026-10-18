@@ -1,6 +1,7 @@
 /** 工具执行过程：紧凑列表、短结果预览和独立详情；状态只保存在本地视图中。 */
 (function () {
   'use strict';
+  var parsedInputs = new Map(), parsedBytes = 0;
   var groups = {}, previews = {}, selected = null, context = null, items = [], detailSignature = '';
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function line(s) { return String(s || '').replace(/\s+/g, ' ').trim(); }
@@ -22,30 +23,47 @@
     return files;
   }
   function describe(it, root) {
-    var p = it.input || {}, text = typeof p === 'string' ? p : '', files = [];
-    var path = [p.path, p.file_path, p.filePath].filter(function (v) { return typeof v === 'string' && v; })[0] || '';
-    var command = typeof p.command === 'string' ? p.command : typeof p.cmd === 'string' ? p.cmd : '';
-    if (!text) {
-      ['patch', 'input', 'code', 'script'].some(function (key) { if (typeof p[key] === 'string') { text = p[key]; return true; } return false; });
+    var p = it.input || {}, cached = parsedInputs.get(p);
+    if (!cached) {
+      var text = typeof p === 'string' ? p : '', files = [];
+      var path = [p.path, p.file_path, p.filePath].filter(function (v) { return typeof v === 'string' && v; })[0] || '';
+      var command = typeof p.command === 'string' ? p.command : typeof p.cmd === 'string' ? p.cmd : '';
+      if (!text) ['patch', 'input', 'code', 'script'].some(function (key) { if (typeof p[key] === 'string') { text = p[key]; return true; } return false; });
+      if (text.indexOf('*** Begin Patch') >= 0) files = patchFiles(text);
+      var old = p.oldText == null ? p.old_string : p.oldText, next = p.newText == null ? p.new_string : p.newText;
+      if (!files.length && path && typeof old === 'string' && typeof next === 'string') {
+        files = [{ path: path, action: 'Update', lines: old.split('\n').map(function (l) { return '-' + l; }).concat(next.split('\n').map(function (l) { return '+' + l; })) }];
+      }
+      if (!files.length && path && Array.isArray(p.edits)) {
+        var edits = p.edits.filter(function (e) { return typeof e.oldText === 'string' && typeof e.newText === 'string'; });
+        if (edits.length) files = [{ path: path, action: 'Update', lines: edits.flatMap(function (e, i) { return ['@@ 替换片段 ' + (i + 1) + '（未提供原始行号） @@'].concat(e.oldText.split('\n').map(function (l) { return '-' + l; }), e.newText.split('\n').map(function (l) { return '+' + l; })); }) }];
+      }
+      if (!files.length && path && typeof p.content === 'string') files = [{ path: path, action: 'Write', lines: ['@@ 写入内容（未提供旧版本） @@'].concat(p.content.split('\n').map(function (l) { return ' ' + l; })) }];
+      var params = typeof p === 'string' ? p : JSON.stringify(p, null, 2);
+      if (typeof p !== 'string' && Object.keys(p).length === 1 && (command || text)) params = command || text;
+      cached = { files: files, path: path, command: command, text: text, params: params === '{}' ? '' : params };
+      cached.bytes = params.length * 4 + files.length * 160;
+      if (cached.bytes <= 8 * 1024 * 1024) {
+        while (parsedInputs.size && (parsedInputs.size >= 8 || parsedBytes + cached.bytes > 8 * 1024 * 1024)) { var key = parsedInputs.keys().next().value; parsedBytes -= parsedInputs.get(key).bytes; parsedInputs.delete(key); }
+        parsedInputs.set(p, cached); parsedBytes += cached.bytes;
+      }
     }
-    if (text.indexOf('*** Begin Patch') >= 0) { files = patchFiles(text); }
-    var old = p.oldText == null ? p.old_string : p.oldText, next = p.newText == null ? p.new_string : p.newText;
-    if (!files.length && path && typeof old === 'string' && typeof next === 'string') {
-      files = [{ path: path, action: 'Update', lines: old.split('\n').map(function (l) { return '-' + l; }).concat(next.split('\n').map(function (l) { return '+' + l; })) }];
-    }
-    var title = files.length ? '修改文件' : command ? '执行命令' : ({ read: '读取文件', write: '写入文件', edit: '修改文件', search: '搜索', grep: '搜索', glob: '查找文件', web: '访问网页', fetch: '访问网页' }[it.kind] || it.name || '工具');
-    var target = files.length ? files.map(function (f) { return relative(f.path, root); }).join('、') : command ? String(command) : path ? relative(path, root) : (it.summary !== it.name ? it.summary : '') || text;
-    var params = typeof p === 'string' ? p : JSON.stringify(p, null, 2);
-    if (typeof p !== 'string' && Object.keys(p).length === 1 && (command || text)) { params = command || text; }
+    var title = cached.files.length ? '修改文件' : cached.command ? '执行命令' : ({ read: '读取文件', write: '写入文件', edit: '修改文件', search: '搜索', grep: '搜索', glob: '查找文件', web: '访问网页', fetch: '访问网页' }[it.kind] || it.name || '工具');
+    var target = cached.files.length ? cached.files.slice(0, 2).map(function (f) { return relative(f.path, root); }).join('、') + (cached.files.length > 2 ? ' 等 ' + cached.files.length + ' 个文件' : '') : cached.command || (cached.path ? relative(cached.path, root) : (it.summary !== it.name ? it.summary : '') || cached.text);
     var output = String(it.output || '');
-    return { title: title, target: line(target), params: params === '{}' ? '' : params, files: files, output: output, long: !!files.length || output.length > 1200 || output.split('\n').length > 8 || params.length > 1200 || params.split('\n').length > 8 };
+    return { title: title, target: line(String(target).slice(0, 1000)), params: cached.params, files: cached.files, output: output, long: !!cached.files.length || output.length > 1200 || output.split('\n', 9).length > 8 || cached.params.length > 1200 || cached.params.split('\n', 9).length > 8 };
+  }
+  function openFiles(it) {
+    var d = describe(it, context.root), ctx = context;
+    var files = d.files.map(function (f) { var path = f.move || f.path; return { path: f.path, abs: /^(\/|[A-Za-z]:[\\/])/.test(path) ? path : ctx.root ? ctx.root.replace(/\/$/, '') + '/' + path : '', lines: f.lines, status: f.action }; });
+    ctx.openChanges(files, (d.files.some(function (f) { return f.action === 'Write'; }) ? '工具写入内容 · 未提供旧版本' : '工具提交的补丁 · 不代表最终文件内容') + ' · 打开时：' + status(it));
   }
   function status(it) { return !it.done ? '执行中' : it.error ? '执行失败' : '执行完成'; }
   function stateIcon(it) { return context.icon(!it.done ? 'loader' : it.error ? 'alert-circle' : 'check', 15); }
   function key(seq) { return context.sid + ':' + seq; }
   function attr(action, seq) { return ' data-tool-action="' + action + '" data-tool-seq="' + seq + '"'; }
   function previewHtml(it, d) {
-    var text = d.output.split('\n').slice(0, 8).join('\n').slice(0, 1200);
+    var text = d.output.split('\n', 8).join('\n').slice(0, 1200);
     if (text.length < d.output.length) { text += '\n…'; }
     return '<div class="pd-tool-preview"><div class="pd-tool-preview-label">' + (it.error ? '错误' : '结果') +
       '<button class="pd-link"' + attr('detail', it.seq) + '>查看详情</button></div><pre>' + esc(text || (!it.done ? '等待工具返回结果…' : '工具已完成，没有文本输出')) + '</pre></div>';
@@ -56,7 +74,7 @@
     return '<div class="pd-tool-entry' + (d.title === '执行命令' ? ' is-command' : '') + (it.error ? ' is-error' : '') + (!it.done ? ' is-running' : '') + (active ? ' is-selected' : '') + '">' +
       '<button class="pd-tool-row"' + attr('row', it.seq) + ' aria-expanded="' + !!previews[key(it.seq)] + '" title="' + esc(d.target || d.title) + '">' +
       '<span class="pd-tool-state" aria-label="' + status(it) + '">' + stateIcon(it) + '</span><span class="pd-tool-row-text"><span class="pd-tool-row-title">' + esc(d.title) + '</span>' +
-      (d.target ? '<span class="pd-tool-target">' + esc(d.target) + '</span>' : '') + '</span>' + (d.files.length ? '<span class="pd-tool-count">' + d.files.length + ' 文件</span>' : '') + context.icon('chevron-right', 14) + '</button>' +
+      (d.target ? '<span class="pd-tool-target">' + esc(d.target) + '</span>' : '') + '</span>' + (d.files.length ? '<span class="pd-tool-count">' + d.files.length + ' 文件</span>' : '') + context.icon('chevron-right', 14) + '</button>' + (d.files.length ? '<button class="pd-link pd-tool-inspect-input"' + attr('inspect', it.seq) + '>参数与执行结果</button>' : '') +
       (error ? '<div class="pd-tool-error-summary">' + esc(error) + '</div>' : '') +
       (!failureOnly && previews[key(it.seq)] ? previewHtml(it, d) : '') + '</div>';
   }
@@ -70,12 +88,9 @@
       '<button class="pd-tool-group-head"' + attr('group', first.seq) + ' aria-expanded="' + open + '">' + ctx.icon(open ? 'chevron-down' : 'chevron-right', 14) + '<span>执行过程</span><span class="pd-tool-group-caption' + (failed ? ' is-error' : '') + '">' + caption + '</span>' + (running ? '<span class="pd-tool-state is-running">' + ctx.icon('loader', 14) + '</span>' : '') + '</button>' +
       (open ? tools.map(function (t) { return rowHtml(t, false); }).join('') : tools.filter(function (t) { return t.error; }).map(function (t) { return rowHtml(t, true); }).join('')) + '</div></div></div>';
   }
-  function codeHtml(text, diff) {
-    if (!diff) { return '<pre class="pd-tool-code">' + esc(text) + '</pre>'; }
-    return '<pre class="pd-tool-code pd-tool-diff">' + text.split('\n').map(function (l) {
-      var cls = l.charAt(0) === '+' ? 'add' : l.charAt(0) === '-' ? 'del' : l.indexOf('@@') === 0 ? 'hunk' : '';
-      return '<span class="pd-tool-diff-line ' + cls + '">' + esc(l || ' ') + '</span>';
-    }).join('') + '</pre>';
+  function codeHtml(text) {
+    var notice = text.length > 64000 ? '<div class="pd-tool-section-label">内容较长，仅展示前 64,000 字符；复制按钮可获取完整内容。</div>' : '';
+    return notice + '<pre class="pd-tool-code">' + esc(text.slice(0, 64000)) + '</pre>';
   }
   function tabText(it, d) {
     if (selected.tab === 'raw') { return JSON.stringify({ tool: it.name, input: it.input, output: it.output || '', done: !!it.done, isError: !!it.error }, null, 2); }
@@ -87,9 +102,9 @@
     if (!pane || !layout) { return; }
     var it = selected && selected.sid === context.sid && items.filter(function (t) { return t.t === 'tool' && t.seq === selected.seq; })[0];
     if (!it) { pane.hidden = true; layout.classList.remove('has-tool-detail'); detailSignature = ''; return; }
-    var d = describe(it, context.root), sig = JSON.stringify([selected, it.done, it.error, d.output, d.params, context.root]);
+    var d = describe(it, context.root), sig = [selected.sid, selected.seq, selected.tab, selected.wrap, it.done, it.error, d.output, d.params, context.root];
     pane.hidden = false; layout.classList.add('has-tool-detail');
-    if (sig === detailSignature) { return; }
+    if (Array.isArray(detailSignature) && sig.every(function (value, i) { return value === detailSignature[i]; })) { return; }
     var selection = window.getSelection();
     if (selection && !selection.isCollapsed && pane.contains(selection.anchorNode)) { return; }
     var old = pane.querySelector('.pd-tool-detail-scroll'), top = old ? old.scrollTop : 0, left = old ? old.scrollLeft : 0;
@@ -100,11 +115,8 @@
     detailSignature = sig;
     var content = '';
     if (selected.tab === 'result' && d.files.length) {
-      content = '<div class="pd-tool-section-label">补丁内容 · ' + d.files.length + ' 个文件</div>' + d.files.map(function (f) {
-        return '<section class="pd-tool-file"><div class="pd-tool-file-head"><span title="' + esc(f.path) + '">' + esc(relative(f.path, context.root)) + '</span><button class="pd-link" data-tool-action="path" data-path="' + esc(f.path) + '">复制路径</button></div>' +
-          (f.action === 'Delete' ? '<div class="pd-tool-section-label">删除文件</div>' : '') + (f.move ? '<div class="pd-tool-section-label">移动到 ' + esc(relative(f.move, context.root)) + '</div>' : '') + codeHtml(f.lines.join('\n'), true) + '</section>';
-      }).join('') + (d.output ? '<div class="pd-tool-section-label">执行结果</div>' + codeHtml(d.output, false) : '');
-    } else { content = codeHtml(tabText(it, d) || '没有参数', false); }
+      content = '<button class="pd-btn"' + attr('changes', it.seq) + '>查看 ' + d.files.length + ' 个文件的补丁</button>' + (d.output ? '<div class="pd-tool-section-label">执行结果</div>' + codeHtml(d.output) : '');
+    } else { content = codeHtml(tabText(it, d) || '没有参数'); }
     pane.dataset.toolKey = key(it.seq) + ':' + selected.tab;
     pane.innerHTML = '<div class="pd-tool-detail-head"><div><strong>' + esc(d.title) + '</strong><span class="pd-tool-detail-status' + (it.error ? ' is-error' : '') + '">' + status(it) + '</span></div><button class="pd-icon-btn" data-tool-action="close" title="关闭工具详情" aria-label="关闭工具详情">' + context.icon('x', 18) + '</button></div>' +
       '<div class="pd-tool-detail-target" title="' + esc(d.target) + '">' + esc(d.target) + '</div><div class="pd-tool-detail-toolbar"><div class="pd-tool-tabs" role="tablist" aria-label="工具详情">' +
@@ -129,12 +141,15 @@
     if (action === 'group') {
       var k = key(seq); groups[k] = el.getAttribute('aria-expanded') !== 'true'; context.refresh();
       var head = document.querySelector('.pd-tool-group-head[data-tool-seq="' + seq + '"]'); if (head) { head.focus({ preventScroll: true }); }
-    } else if (action === 'row' || action === 'detail') {
+    } else if (action === 'changes') { if (it) { openFiles(it); }
+    } else if (action === 'row' || action === 'detail' || action === 'inspect') {
       if (!it) { return; }
+      if (action !== 'inspect' && describe(it, context.root).files.length) { openFiles(it); return; }
+      PDChanges.close(false);
       var group = el.closest('.pd-tool-group'), groupHead = group && group.querySelector('.pd-tool-group-head');
       if (groupHead) { groups[key(+groupHead.dataset.toolSeq)] = true; }
       if (action === 'row' && !describe(it, context.root).long) { previews[key(seq)] = !previews[key(seq)]; }
-      else { selected = { sid: context.sid, seq: seq, tab: 'result', wrap: true }; }
+      else { selected = { sid: context.sid, seq: seq, tab: action === 'inspect' ? 'params' : 'result', wrap: true }; }
       context.refresh();
       if (selected && selected.seq === seq) { var close = document.querySelector('#tool-inspector [data-tool-action="close"]'); if (close) { close.focus({ preventScroll: true }); } }
     } else if (action === 'close') { closeDetail(); }
@@ -166,6 +181,7 @@
     groupHtml: groupHtml,
     describe: describe,
     update: function (all, ctx) { context = ctx; items = all; renderDetail(); },
-    reset: function () { selected = null; detailSignature = ''; items = []; context = null; }
+    dismiss: function () { selected = null; detailSignature = ''; renderDetail(); document.querySelectorAll('.pd-tool-entry.is-selected').forEach(function (el) { el.classList.remove('is-selected'); }); },
+    reset: function () { parsedInputs.clear(); parsedBytes = 0; selected = null; detailSignature = ''; items = []; context = null; }
   };
 }());

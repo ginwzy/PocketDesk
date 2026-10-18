@@ -30,8 +30,10 @@
   }
 
   /** api：调用接口，失败时抛出带提示文字的错误 */
-  function api(method, path, body, wait) {
+  function api(method, path, body, wait, signal) {
     var controller = new AbortController(), expired = false;
+    function cancel() { controller.abort(); }
+    if (signal) { if (signal.aborted) { cancel(); } else { signal.addEventListener('abort', cancel, { once: true }); } }
     var timer = setTimeout(function () { expired = true; controller.abort(); }, wait === undefined ? 60000 : wait);
     return fetch(path, {
       signal: controller.signal,
@@ -49,7 +51,7 @@
     }).catch(function (error) {
       if (expired) { var timeout = new Error('等待电脑响应超时，请重试或确认操作结果'); timeout.code = 'timeout'; throw timeout; }
       throw error;
-    }).finally(function () { clearTimeout(timer); });
+    }).finally(function () { clearTimeout(timer); if (signal) { signal.removeEventListener('abort', cancel); } });
   }
 
   /** uploadForm：以表单上传文件 */
@@ -840,6 +842,7 @@
   function renderMain() {
     var el = document.getElementById('main');
     if (!el) { return; }
+    PDChanges.close(false);
     PDToolView.reset();
     var r = route();
     if (r.page !== 'chat') { PDX.detachTerminal(); }
@@ -874,7 +877,7 @@
       '<div class="pd-composer-foot"><span class="pd-hint">Enter 发送，Shift + Enter 换行；可直接粘贴或拖入图片、文件</span>' +
       '<button class="pd-btn pd-btn-primary" id="send" data-act="send" disabled>发送</button></div>' +
       '<input type="file" id="file-any" class="pd-file-input" multiple tabindex="-1" aria-hidden="true"><input type="file" id="file-img" class="pd-file-input" accept="image/*" multiple tabindex="-1" aria-hidden="true"></div>';
-    el.innerHTML = '<header class="pd-head" id="head"></header><div class="pd-chat-layout" id="chat-layout"><div class="pd-chat-column"><div class="pd-msgs" id="msgs"><div class="pd-empty">正在加载…</div></div>' + composer + '</div><aside id="tool-inspector" class="pd-tool-inspector" aria-label="工具详情" hidden></aside></div>';
+    el.innerHTML = '<header class="pd-head" id="head"></header><div class="pd-chat-layout" id="chat-layout"><div class="pd-chat-column"><div class="pd-msgs" id="msgs"><div class="pd-empty">正在加载…</div></div>' + composer + '</div><aside id="tool-inspector" class="pd-tool-inspector" aria-label="工具详情" hidden></aside><aside id="change-view" class="ch-view" aria-label="文件变更" hidden></aside></div>';
     renderHead();
     renderPending();
     renderChosen();
@@ -913,6 +916,8 @@
       '<button class="pd-icon-btn" data-act="chat-more" title="更多" aria-label="更多">' + icon('menu', 18) + '</button></div>';
   }
 
+  var changeGroups = Object.create(null);
+
   /** renderMsgs：重绘消息；原本在底部或首次打开时滚到底部 */
   function renderMsgs(first, preserve) {
     var el = document.getElementById('msgs');
@@ -924,8 +929,12 @@
     var anchorSeq = anchor && (anchor.dataset.toolSeq || anchor.dataset.seq), anchorOffset = anchor && anchor.getBoundingClientRect().top - viewportTop;
     var items = buildItems(lg.events.length ? lg.events : [{ session: sid }]);
     var s = session(sid);
-    var ws = s && wsById(s.workspaceId), root = ws ? ws.rootPath.replace(/\/$/, '') + (s.cwd && s.cwd !== '.' ? '/' + s.cwd : '') : '';
-    var toolContext = { sid: sid, root: root, icon: icon, copy: copyText, refresh: function () { renderMsgs(false, true); } };
+    var ws = s && wsById(s.workspaceId), root = ws ? ws.rootPath : s && s.workspaceId === 'computer' ? '/' : '';
+    if (s && s.cwd && s.cwd !== '.') { root = /^(\/|[A-Za-z]:[\\/])/.test(s.cwd) ? s.cwd : root ? root.replace(/\/$/, '') + '/' + s.cwd : ''; }
+    changeGroups = Object.create(null);
+    var toolContext = { sid: sid, root: root, icon: icon, copy: copyText, openChanges: function (files, source) {
+      openChanges(sid, files, 0, source, function (file) { return Promise.resolve(file.lines.join('\n')); });
+    }, refresh: function () { renderMsgs(false, true); } };
     var out = '', lastAt = 0;
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
@@ -986,17 +995,17 @@
           '<button class="pd-link" data-act="decide" data-id="' + esc(it.id) + '" data-action="always">本会话总是允许此类操作</button></div>') + '</div>';
         break;
       case 'diff':
+        changeGroups[it.seq] = { files: it.files, at: it.at };
         mine = false; who = agentKind;
         body = '<div class="pd-card-msg"><div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">' + icon('git-compare', 16) + '改动了 ' + it.files.length + ' 个文件</div>' +
-          it.files.map(function (f) {
+          it.files.slice(0, 8).map(function (f, index) {
             var gone = f.status === 'deleted' || f.status === 'D';
-            var name = f.ref ? '<button class="pd-link" data-act="diff-ref" data-ref="' + esc(f.ref) + '" data-path="' + esc(f.path) + '" title="查看改动">' + esc(f.path) + '</button>' :
-              f.abs && !gone ? '<button class="pd-link" data-act="diff-open" data-abs="' + esc(f.abs) + '">' + esc(f.path) + '</button>' : '<span>' + esc(f.path) + '</span>';
+            var name = '<button class="pd-link" data-act="diff-ref" data-change-seq="' + it.seq + '" data-file-index="' + index + '" title="查看本轮改动">' + esc(f.path) + '</button>';
             var reveal = (f.ref && f.abs && !gone ? '<button class="pd-icon-btn" data-act="diff-open" data-abs="' + esc(f.abs) + '" title="打开文件" aria-label="打开文件">' + icon('file-text', 14) + '</button>' : '') + (f.abs ? '<button class="pd-icon-btn" data-act="diff-reveal" data-abs="' + esc(f.abs) + '" data-gone="' + (gone ? 1 : 0) + '" title="显示所在文件夹" aria-label="显示所在文件夹">' + icon('folder-open', 14) + '</button>' : '');
             var stat = f.binary ? '<span class="pd-muted">' + (f.status === 'added' || f.status === 'A' ? '新建' : gone ? '删除' : '已修改') + ' · 二进制</span>' :
               '<span class="pd-add">+' + (f.added || 0) + '</span><span class="pd-del">-' + (f.removed || 0) + '</span>';
             return '<div class="pd-diff-row">' + name + stat + reveal + '</div>';
-          }).join('') + '</div>';
+          }).join('') + '<button class="pd-link" data-act="diff-ref" data-change-seq="' + it.seq + '" data-file-index="0" style="margin-top:8px">' + (it.files.length > 8 ? '查看全部 ' + it.files.length + ' 个文件' : '打开变更查看区') + '</button></div>';
         break;
       case 'sys':
         return '<div class="pd-sys' + (it.error ? ' err' : '') + '" data-seq="' + it.seq + '">' + esc(it.text) + (it.retryable ? ' <button class="pd-link" data-act="retry">重试</button>' : '') + '</div>';
@@ -1613,17 +1622,21 @@
     });
   }
 
-  /** diffModal：查看本轮某个文件的改动 */
-  function diffModal(sid, ref, path) {
-    api('GET', P + '/api/sessions/' + encodeURIComponent(sid) + '/diff?ref=' + encodeURIComponent(ref)).then(function (r) {
-      var lines = String((r && r.diff) || '').split('\n').map(function (l) {
-        var cls = /^(\+\+\+|---)/.test(l) ? 'pd-diff-meta' : l[0] === '+' ? 'pd-diff-add' : l[0] === '-' ? 'pd-diff-del' : l.indexOf('@@') === 0 ? 'pd-diff-hunk' : '';
-        return '<div class="' + cls + '">' + (esc(l) || '&nbsp;') + '</div>';
-      }).join('');
-      modalRoot.innerHTML = '<div class="pd-scrim"><div class="pd-dialog pd-dialog-wide" role="dialog" aria-modal="true" aria-label="改动">' +
-        '<div class="pd-dialog-head"><div class="pd-dialog-title">' + esc(path) + '</div><button class="pd-icon-btn" data-act="modal-close" aria-label="关闭">' + icon('x', 18) + '</button></div>' +
-        '<div class="pd-modal-body"><div class="pd-diff-text">' + lines + '</div></div></div></div>';
-    }).catch(function (er) { toast(er.message); });
+  /** Both entry points share a reader, while their source labels remain explicit. */
+  function openChanges(sid, files, index, source, loader) {
+    PDToolView.dismiss();
+    PDChanges.open({ sid: sid, files: files, index: index, source: source, copy: copyText,
+      load: loader || function (file, signal) {
+        if (!file.ref) { return Promise.resolve(null); }
+        return api('GET', P + '/api/sessions/' + encodeURIComponent(sid) + '/diff?ref=' + encodeURIComponent(file.ref), undefined, 45000, signal).then(function (r) { return r.diff; });
+      },
+      openFile: function (file, reveal) {
+        if (!file.abs) { return; }
+        if (!reveal && isImage(file.abs)) { imagePreview(file.path + ' · 当前文件', '/admin/api/local-file?path=' + encodeURIComponent(file.abs), ''); return; }
+        var path = reveal && /^(D|deleted|Delete)$/.test(file.status) ? file.abs.replace(/[\\/][^\\/]*$/, '') : file.abs;
+        api('POST', '/admin/api/open', { which: 'abs', path: path, reveal: reveal }).catch(function (e) { toast(e.message); });
+      }
+    });
   }
 
   /** popMenu：在指定位置弹出菜单 */
@@ -2335,7 +2348,10 @@
         renderChosen();
         break;
       case 'external-pick': importExternal(externalList[+t.dataset.i]); break;
-      case 'diff-ref': diffModal(sid, t.dataset.ref, t.dataset.path); break;
+      case 'diff-ref':
+        var changes = changeGroups[t.dataset.changeSeq];
+        if (changes) { openChanges(sid, changes.files, +t.dataset.fileIndex || 0, '所选轮次的已保存差异' + (changes.at ? ' · ' + chatTime(changes.at) : '') + ' · 非当前文件'); }
+        break;
       case 'notify-random':
         var nt = document.getElementById('ntopic'), nk = document.getElementById('nkind');
         if (nk && !nk.value) { nk.value = 'ntfy'; }

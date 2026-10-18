@@ -43,14 +43,6 @@
 .pd-tool-section-label { color: var(--pd-text-3); font-size: 11px; margin: 4px 0 10px; }
 .pd-tool-code { font: 12px/1.6 var(--pd-mono); margin: 0 0 16px; white-space: pre; color: var(--pd-text-2); user-select: text; -webkit-user-select: text; tab-size: 4; }
 .pd-tool-detail-scroll.wrap .pd-tool-code { white-space: pre-wrap; overflow-wrap: anywhere; }
-.pd-tool-file { margin-bottom: 18px; }
-.pd-tool-file-head { display: flex; justify-content: space-between; gap: 8px; font: 12px/1.5 var(--pd-mono); padding: 7px 0; border-bottom: 1px solid var(--pd-line); margin-bottom: 6px; }
-.pd-tool-file-head > span { min-width: 0; overflow-wrap: anywhere; }
-.pd-tool-file-head button { flex-shrink: 0; font-family: inherit; }
-.pd-tool-diff-line { display: block; min-height: 1.6em; }
-.pd-tool-diff-line.add { color: var(--pd-accent); background: var(--pd-accent-soft); }
-.pd-tool-diff-line.del { color: var(--pd-danger); background: color-mix(in srgb, var(--pd-danger) 8%, transparent); }
-.pd-tool-diff-line.hunk { color: var(--pd-text-3); }
 @container (min-width: 1080px) {
   .pd-tool-inspector { position: relative; flex: 0 0 42%; width: auto; max-width: 600px; box-shadow: none; }
 }
@@ -61,3 +53,5 @@
   .pd-tool-entry.is-command .pd-tool-target { color: var(--pd-text-2); }
   .pd-tool-group-caption { font-size: 10px; }
 }
+
+.pd-tool-inspect-input { margin: 0 12px 8px 33px; font-size: 11px; }

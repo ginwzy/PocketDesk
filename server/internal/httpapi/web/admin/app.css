@@ -324,12 +324,6 @@ select.pd-input { cursor: pointer; }
 .pd-cmd { width: 100%; display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 0; border-radius: 5px; background: none; text-align: left; cursor: pointer; color: var(--pd-text); font-size: 13px; }
 .pd-cmd .pd-mono { min-width: 76px; }
 .pd-cmd:hover, .pd-cmd.active { background: var(--pd-hover); }
-.pd-dialog.pd-dialog-wide { width: 760px; }
-.pd-diff-text { font: 12px/1.6 var(--pd-mono); white-space: pre-wrap; word-break: break-all; user-select: text; -webkit-user-select: text; }
-.pd-diff-add { background: var(--pd-accent-soft); color: var(--pd-accent); }
-.pd-diff-del { background: rgba(250, 81, 81, .1); color: var(--pd-danger); }
-.pd-diff-hunk { color: var(--pd-text-3); }
-.pd-diff-meta { color: var(--pd-text-3); font-weight: 600; }
 .pd-skill-md { max-height: 56vh; overflow: auto; font-size: 13px; }
 .pd-app.pd-dragging .pd-drop { outline: 2px dashed var(--pd-accent); outline-offset: -8px; }
 
