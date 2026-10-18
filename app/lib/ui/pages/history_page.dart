@@ -115,8 +115,25 @@ class _HistoryPageState extends State<HistoryPage> {
   final _children = <String, List<Map<String, dynamic>>>{};
   final _counts = <String, int>{};
   String _query = '';
-  double get _rowExtent =>
-      112 * math.max(1, MediaQuery.textScalerOf(context).scale(14) / 14);
+  bool _hasSummary(_RouteRow row) {
+    final t = row.turn;
+    final id = Json.str(t['id']);
+    return _query.isEmpty &&
+        !_expanded.contains(id) &&
+        (_children[id]?.isNotEmpty ?? false) &&
+        Json.str(t['latestText']).isNotEmpty &&
+        t['latestText'] != t['text'];
+  }
+
+  double _rowExtent(_RouteRow row) {
+    final scale = MediaQuery.textScalerOf(context);
+    return math.max(
+      76,
+      24 +
+          scale.scale(14) * 1.35 * 2 +
+          scale.scale(11) * 1.3 * (_hasSummary(row) ? 2 : 1),
+    );
+  }
 
   @override
   void initState() {
@@ -198,12 +215,13 @@ class _HistoryPageState extends State<HistoryPage> {
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
-      final index = _rows.indexWhere((r) => Json.boolean(r.turn['here']));
+      final rows = _rows;
+      final index = rows.indexWhere((r) => Json.boolean(r.turn['here']));
+      final offset = rows
+          .take(math.max(0, index))
+          .fold<double>(0, (sum, row) => sum + _rowExtent(row));
       _scroll.animateTo(
-        (math.max(0, index) * _rowExtent).clamp(
-          0,
-          _scroll.position.maxScrollExtent,
-        ),
+        offset.clamp(0, _scroll.position.maxScrollExtent),
         duration: const Duration(milliseconds: 220),
         curve: Curves.easeOut,
       );
@@ -232,196 +250,206 @@ class _HistoryPageState extends State<HistoryPage> {
     final c = context.pd;
     final rows = _rows;
     return Scaffold(
-      appBar: const PdBar(title: '历史分支', subtitle: '沿着连线，查看对话走过的路线'),
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: TextField(
-              controller: _search,
-              decoration: const InputDecoration(
-                prefixIcon: Icon(LucideIcons.search300),
-                hintText: '搜索请求或回复',
-              ),
-              onChanged: (s) => setState(() => _query = s.trim().toLowerCase()),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(
-              children: [
-                Icon(Icons.circle, size: 8, color: c.accent),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '绿色连线是当前路线',
-                    style: TextStyle(color: c.text2, fontSize: 12),
-                  ),
-                ),
-                TextButton(onPressed: _locate, child: const Text('定位当前')),
-              ],
-            ),
-          ),
-          Expanded(
-            child: rows.isEmpty
-                ? Center(
-                    child: Text(
-                      widget.history['tree'] == null
-                          ? '请先更新电脑端，才能查看分支树'
-                          : '没有匹配的对话',
-                    ),
-                  )
-                : ListView.builder(
-                    controller: _scroll,
-                    itemExtent: _rowExtent,
-                    itemCount: rows.length,
-                    itemBuilder: (ctx, i) {
-                      final row = rows[i];
-                      final t = row.turn;
-                      final id = Json.str(t['id']);
-                      final children = _children[id] ?? [];
-                      final here = Json.boolean(t['here']);
-                      final expanded =
-                          _query.isNotEmpty || _expanded.contains(id);
-                      final date = DateTime.tryParse(
-                        Json.str(
-                          !expanded && children.isNotEmpty
-                              ? t['latestAt'] ?? t['timestamp']
-                              : t['timestamp'],
+      appBar: PdBar(
+        title: '历史分支',
+        toolbarHeight: math.max(
+          PdSize.topBar,
+          MediaQuery.textScalerOf(context).scale(PdFont.title) * 1.5,
+        ),
+      ),
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _search,
+                      style: const TextStyle(fontSize: 14),
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 12,
                         ),
-                      )?.toLocal();
-                      final meta = [
-                        if (date != null)
-                          '${date.month}/${date.day} ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}',
-                        if (children.length > 1) '${children.length} 条后续路线',
-                        if (!expanded && children.isNotEmpty)
-                          '已收起 ${(_counts[id] ?? 1) - 1} 轮',
-                      ].join(' · ');
-                      return Padding(
-                        key: ValueKey('history-turn-$id'),
-                        padding: EdgeInsets.only(left: 16, right: 12),
-                        child: Row(
-                          children: [
-                            SizedBox(
-                              width: 20 + math.min(row.depth, 5) * 14.0,
-                              height: _rowExtent,
-                              child: CustomPaint(
-                                painter: _RoutePainter(
-                                  row,
-                                  c.accent,
-                                  c.divider,
-                                  c.page,
-                                  expanded && children.isNotEmpty,
+                        prefixIcon: Icon(LucideIcons.search300, size: 20),
+                        hintText: '搜索请求或回复',
+                      ),
+                      onChanged: (s) =>
+                          setState(() => _query = s.trim().toLowerCase()),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  TextButton(onPressed: _locate, child: const Text('定位当前')),
+                ],
+              ),
+            ),
+            Expanded(
+              child: rows.isEmpty
+                  ? Center(
+                      child: Text(
+                        widget.history['tree'] == null
+                            ? '请先更新电脑端，才能查看分支树'
+                            : '没有匹配的对话',
+                      ),
+                    )
+                  : ListView.builder(
+                      controller: _scroll,
+                      itemExtentBuilder: (i, _) => _rowExtent(rows[i]),
+                      itemCount: rows.length,
+                      itemBuilder: (ctx, i) {
+                        final row = rows[i];
+                        final t = row.turn;
+                        final id = Json.str(t['id']);
+                        final children = _children[id] ?? [];
+                        final here = Json.boolean(t['here']);
+                        final expanded =
+                            _query.isNotEmpty || _expanded.contains(id);
+                        final date = DateTime.tryParse(
+                          Json.str(
+                            !expanded && children.isNotEmpty
+                                ? t['latestAt'] ?? t['timestamp']
+                                : t['timestamp'],
+                          ),
+                        )?.toLocal();
+                        final meta = [
+                          if (date != null)
+                            '${date.month}/${date.day} ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}',
+                          if (children.length > 1) '${children.length} 条后续路线',
+                          if (!expanded && children.isNotEmpty)
+                            '已收起 ${(_counts[id] ?? 1) - 1} 轮',
+                        ].join(' · ');
+                        return Padding(
+                          key: ValueKey('history-turn-$id'),
+                          padding: const EdgeInsets.only(left: 12, right: 8),
+                          child: Row(
+                            children: [
+                              SizedBox(
+                                width: 20 + math.min(row.depth, 5) * 14.0,
+                                height: _rowExtent(row),
+                                child: CustomPaint(
+                                  painter: _RoutePainter(
+                                    row,
+                                    c.accent,
+                                    c.divider,
+                                    c.page,
+                                    expanded && children.isNotEmpty,
+                                  ),
                                 ),
                               ),
-                            ),
-                            Expanded(
-                              child: Semantics(
-                                label: here ? '当前所在' : null,
-                                child: InkWell(
-                                  onTap: () => _preview(t),
-                                  borderRadius: BorderRadius.circular(10),
-                                  child: Container(
-                                    margin: const EdgeInsets.symmetric(
-                                      vertical: 5,
-                                    ),
-                                    padding: const EdgeInsets.all(10),
-                                    decoration: BoxDecoration(
-                                      color: here ? c.accentSoft : c.card,
-                                      borderRadius: BorderRadius.circular(10),
-                                      border: Border.all(
-                                        color: here ? c.accent : c.divider,
+                              Expanded(
+                                child: Semantics(
+                                  label: here ? '当前所在' : null,
+                                  child: InkWell(
+                                    onTap: () => _preview(t),
+                                    borderRadius: BorderRadius.circular(10),
+                                    child: Container(
+                                      margin: const EdgeInsets.symmetric(
+                                        vertical: 3,
                                       ),
-                                    ),
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.center,
-                                      children: [
-                                        if (here)
-                                          Text(
-                                            '当前所在',
-                                            style: TextStyle(
-                                              color: c.accent,
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                        Text(
-                                          Json.str(t['text']).isEmpty
-                                              ? '无文字请求'
-                                              : Json.str(t['text']),
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.w600,
-                                            fontSize: 14,
-                                          ),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 7,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: here ? c.accentSoft : c.card,
+                                        borderRadius: BorderRadius.circular(10),
+                                        border: Border.all(
+                                          color: here ? c.accent : c.divider,
                                         ),
-                                        if (!expanded &&
-                                            children.isNotEmpty &&
-                                            Json.str(t['latestText'])
-                                                .isNotEmpty &&
-                                            t['latestText'] != t['text'])
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        children: [
                                           Text(
-                                            '末条请求：${t['latestText']}',
-                                            maxLines: 1,
+                                            Json.str(t['text']).isEmpty
+                                                ? '无文字请求'
+                                                : Json.str(t['text']),
+                                            maxLines: 2,
                                             overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              color: c.text2,
-                                              fontSize: 11,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w600,
+                                              fontSize: 14,
+                                              height: 1.35,
                                             ),
                                           ),
-                                        if (meta.isNotEmpty)
-                                          Text(
-                                            meta,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              color: c.text2,
-                                              fontSize: 11,
+                                          if (_hasSummary(row))
+                                            Text(
+                                              '末条请求：${t['latestText']}',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                color: c.text2,
+                                                fontSize: 11,
+                                                height: 1.3,
+                                              ),
                                             ),
+                                          Row(
+                                            children: [
+                                              if (here) ...[
+                                                Text(
+                                                  '当前所在',
+                                                  style: TextStyle(
+                                                    color: c.accent,
+                                                    fontSize: 11,
+                                                    height: 1.3,
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 6),
+                                              ],
+                                              if (meta.isNotEmpty)
+                                                Expanded(
+                                                  child: Text(
+                                                    meta,
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                    style: TextStyle(
+                                                      color: c.text2,
+                                                      fontSize: 11,
+                                                      height: 1.3,
+                                                    ),
+                                                  ),
+                                                ),
+                                            ],
                                           ),
-                                      ],
+                                        ],
+                                      ),
                                     ),
                                   ),
                                 ),
                               ),
-                            ),
-                            if (children.isNotEmpty)
-                              IconButton(
-                                tooltip: expanded ? '收起后续路线' : '展开后续路线',
-                                onPressed: () => setState(() {
-                                  if (expanded) {
-                                    _expanded.remove(id);
-                                  } else {
-                                    _expanded.add(id);
-                                  }
-                                }),
-                                icon: Icon(
-                                  expanded
-                                      ? Icons.expand_less
-                                      : Icons.expand_more,
+                              if (children.isNotEmpty)
+                                IconButton(
+                                  tooltip: expanded ? '收起后续路线' : '展开后续路线',
+                                  onPressed: () => setState(() {
+                                    if (expanded) {
+                                      _expanded.remove(id);
+                                    } else {
+                                      _expanded.add(id);
+                                    }
+                                  }),
+                                  icon: Icon(
+                                    expanded
+                                        ? Icons.expand_less
+                                        : Icons.expand_more,
+                                  ),
                                 ),
-                              ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
-          ),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(
-                '点击节点先预览。切换不会撤销文件或已执行的命令。',
-                style: TextStyle(color: c.text2, fontSize: 12),
-              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

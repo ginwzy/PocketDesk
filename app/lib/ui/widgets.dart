@@ -13,9 +13,10 @@ import 'tokens.dart';
  * PdBar：顶栏，标题下方可带一行小字
  */
 class PdBar extends StatelessWidget implements PreferredSizeWidget {
-  const PdBar({super.key, required this.title, this.subtitle = '', this.actions = const [], this.leading, this.dark = false, this.onTitleTap});
+  const PdBar({super.key, required this.title, this.subtitle = '', this.actions = const [], this.leading, this.dark = false, this.onTitleTap, this.toolbarHeight});
 
   final String title;
+  final double? toolbarHeight;
   final String subtitle;
   final List<Widget> actions;
   final Widget? leading;
@@ -23,7 +24,7 @@ class PdBar extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback? onTitleTap;
 
   @override
-  Size get preferredSize => Size.fromHeight(subtitle.isEmpty ? PdSize.topBar : PdSize.chatBar);
+  Size get preferredSize => Size.fromHeight(toolbarHeight ?? (subtitle.isEmpty ? PdSize.topBar : PdSize.chatBar));
 
   @override
   Widget build(BuildContext context) {

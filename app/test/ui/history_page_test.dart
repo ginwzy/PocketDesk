@@ -64,6 +64,8 @@ void main() {
   Future<void> open(
     WidgetTester tester, {
     void Function(Map<String, dynamic>?)? onSelected,
+    Map<String, dynamic>? history,
+    double textScale = 1,
   }) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
@@ -71,6 +73,11 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(
       MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: TextScaler.linear(textScale)),
+          child: child!,
+        ),
         home: Builder(
           builder: (context) => Scaffold(
             body: TextButton(
@@ -79,7 +86,7 @@ void main() {
                     .push<Map<String, dynamic>>(
                       MaterialPageRoute(
                         builder: (_) => HistoryPage(
-                          history: fixture(),
+                          history: history ?? fixture(),
                           loadPreview: preview,
                         ),
                       ),
@@ -161,5 +168,41 @@ void main() {
     expect(selected?['mode'], 'edit');
     expect(selected?['text'], '完整的原始内容');
     expect(selected?['inputNotice'], '旧记录提示');
+  });
+  testWidgets('紧凑节点保留双行标题和折叠摘要，大字体定位不溢出', (tester) async {
+    final history = {
+      'tree': [
+        {'id': 'root', 'text': '对话起点', 'current': true},
+        for (var i = 1; i <= 14; i++)
+          {
+            ...turn(
+              'u$i',
+              i == 1 ? 'root' : 'u${i - 1}',
+              'review 当前修改，找到可以简化的地方和架构的问题优化',
+              current: true,
+              here: i == 14,
+            ),
+            'timestamp': '2026-10-18T16:51:00+08:00',
+          },
+        {...turn('old', 'u3', '另一条路线'), 'latestText': '补充最后一条请求'},
+        turn('old-child', 'old', '补充最后一条请求'),
+      ],
+    };
+    await open(tester, history: history);
+    expect(
+      tester.getSize(find.byKey(const ValueKey('history-turn-u1'))).height,
+      lessThan(80),
+    );
+    await tester.tap(find.text('定位当前'));
+    await tester.pumpAndSettle();
+    expect(tester.getRect(find.text('当前所在')).bottom, lessThan(844));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    await open(tester, history: history, textScale: 2);
+    await tester.tap(find.text('定位当前'));
+    await tester.pumpAndSettle();
+    expect(tester.getRect(find.text('当前所在')).bottom, lessThan(844));
+    expect(find.text('末条请求：补充最后一条请求'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }
