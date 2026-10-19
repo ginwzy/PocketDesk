@@ -32,7 +32,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	entries, err := workspace.List(ws.RootPath, q.Get("path"), workspace.ListOptions{Sort: q.Get("sort"), Desc: q.Get("order") == "desc", ShowHidden: q.Get("hidden") == "1"})
+	entries, err := workspace.List(ws.RootPath, q.Get("path"), workspace.ListOptions{Sort: q.Get("sort"), Desc: q.Get("order") == "desc", ShowHidden: q.Get("hidden") == "1", SkipChildCount: q.Get("counts") == "0"})
 	if err != nil {
 		writeErr(w, r, err)
 		return

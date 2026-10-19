@@ -94,6 +94,10 @@ func TestListSortsDateFoldersAndHidesDotfiles(t *testing.T) {
 	if list[0].ChildCount != 1 || !list[0].DateFolder || list[0].Path != "20261001" {
 		t.Fatalf("文件夹信息 %+v", list[0])
 	}
+	list, err = List(root, "", ListOptions{SkipChildCount: true})
+	if err != nil || len(list) != 6 || list[0].Name != "20261001" || list[0].ChildCount != -1 || !list[0].DateFolder {
+		t.Fatalf("跳过子项统计应保留目录信息: %+v, %v", list, err)
+	}
 	list, _ = List(root, "", ListOptions{Sort: "size", Desc: true, ShowHidden: true})
 	if list[len(list)-1].Name != ".hidden" && list[len(list)-1].Name != "A.txt" {
 		t.Fatalf("按大小倒序异常: %+v", list)

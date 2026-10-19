@@ -877,7 +877,7 @@
       '<div class="pd-composer-foot"><span class="pd-hint">Enter 发送，Shift + Enter 换行；可直接粘贴或拖入图片、文件</span>' +
       '<button class="pd-btn pd-btn-primary" id="send" data-act="send" disabled>发送</button></div>' +
       '<input type="file" id="file-any" class="pd-file-input" multiple tabindex="-1" aria-hidden="true"><input type="file" id="file-img" class="pd-file-input" accept="image/*" multiple tabindex="-1" aria-hidden="true"></div>';
-    el.innerHTML = '<header class="pd-head" id="head"></header><div class="pd-chat-layout" id="chat-layout"><div class="pd-chat-column"><div class="pd-msgs" id="msgs"><div class="pd-empty">正在加载…</div></div>' + composer + '</div><aside id="tool-inspector" class="pd-tool-inspector" aria-label="工具详情" hidden></aside><aside id="change-view" class="ch-view" aria-label="文件变更" hidden></aside></div>';
+    el.innerHTML = '<header class="pd-head" id="head"></header><div class="pd-chat-layout" id="chat-layout"><div class="pd-chat-column"><div class="pd-msgs" id="msgs"><div class="pd-empty">正在加载…</div></div>' + composer + '</div><aside id="tool-inspector" class="pd-tool-inspector" aria-label="工具详情" hidden></aside><aside id="change-view" class="ch-view" aria-label="文件侧栏" hidden></aside></div>';
     renderHead();
     renderPending();
     renderChosen();
@@ -913,6 +913,7 @@
       '<button class="pd-icon-btn" data-act="head-mute" title="' + (s.muted ? '打开提醒' : '关闭提醒') + '" aria-label="' + (s.muted ? '打开提醒' : '关闭提醒') + '">' + icon(s.muted ? 'bell-off' : 'bell', 18) + '</button>' : '') +
       (s.kind === 'pi' ? '<button class="pd-icon-btn" data-act="history-open" title="历史分支" aria-label="历史分支">' + icon('history', 18) + '</button>' : '') +
       PDX.presetHeadHtml(s) +
+      (isAgent(s) ? '<button class="pd-icon-btn" data-act="files-sidebar" title="文件与 Diff" aria-label="文件与 Diff" aria-expanded="' + PDChanges.isOpen() + '" aria-controls="change-view">' + icon('folder-open', 18) + '</button>' : '') +
       '<button class="pd-icon-btn" data-act="chat-more" title="更多" aria-label="更多">' + icon('menu', 18) + '</button></div>';
   }
 
@@ -929,11 +930,10 @@
     var anchorSeq = anchor && (anchor.dataset.toolSeq || anchor.dataset.seq), anchorOffset = anchor && anchor.getBoundingClientRect().top - viewportTop;
     var items = buildItems(lg.events.length ? lg.events : [{ session: sid }]);
     var s = session(sid);
-    var ws = s && wsById(s.workspaceId), root = ws ? ws.rootPath : s && s.workspaceId === 'computer' ? '/' : '';
-    if (s && s.cwd && s.cwd !== '.') { root = /^(\/|[A-Za-z]:[\\/])/.test(s.cwd) ? s.cwd : root ? root.replace(/\/$/, '') + '/' + s.cwd : ''; }
+    var root = sessionRoot(s);
     changeGroups = Object.create(null);
     var toolContext = { sid: sid, root: root, icon: icon, copy: copyText, openChanges: function (files, source) {
-      openChanges(sid, files, 0, source, function (file) { return Promise.resolve(file.lines.join('\n')); });
+      openChanges(sid, files, 0, source);
     }, refresh: function () { renderMsgs(false, true); } };
     var out = '', lastAt = 0;
     for (var i = 0; i < items.length; i++) {
@@ -1001,11 +1001,10 @@
           it.files.slice(0, 8).map(function (f, index) {
             var gone = f.status === 'deleted' || f.status === 'D';
             var name = '<button class="pd-link" data-act="diff-ref" data-change-seq="' + it.seq + '" data-file-index="' + index + '" title="查看本轮改动">' + esc(f.path) + '</button>';
-            var reveal = (f.ref && f.abs && !gone ? '<button class="pd-icon-btn" data-act="diff-open" data-abs="' + esc(f.abs) + '" title="打开文件" aria-label="打开文件">' + icon('file-text', 14) + '</button>' : '') + (f.abs ? '<button class="pd-icon-btn" data-act="diff-reveal" data-abs="' + esc(f.abs) + '" data-gone="' + (gone ? 1 : 0) + '" title="显示所在文件夹" aria-label="显示所在文件夹">' + icon('folder-open', 14) + '</button>' : '');
             var stat = f.binary ? '<span class="pd-muted">' + (f.status === 'added' || f.status === 'A' ? '新建' : gone ? '删除' : '已修改') + ' · 二进制</span>' :
               '<span class="pd-add">+' + (f.added || 0) + '</span><span class="pd-del">-' + (f.removed || 0) + '</span>';
-            return '<div class="pd-diff-row">' + name + stat + reveal + '</div>';
-          }).join('') + '<button class="pd-link" data-act="diff-ref" data-change-seq="' + it.seq + '" data-file-index="0" style="margin-top:8px">' + (it.files.length > 8 ? '查看全部 ' + it.files.length + ' 个文件' : '打开变更查看区') + '</button></div>';
+            return '<div class="pd-diff-row">' + name + stat + '</div>';
+          }).join('') + '<button class="pd-link" data-act="diff-ref" data-change-seq="' + it.seq + '" data-file-index="0" style="margin-top:8px">' + (it.files.length > 8 ? '查看全部 ' + it.files.length + ' 个文件' : '查看 Diff') + '</button></div>';
         break;
       case 'sys':
         return '<div class="pd-sys' + (it.error ? ' err' : '') + '" data-seq="' + it.seq + '">' + esc(it.text) + (it.retryable ? ' <button class="pd-link" data-act="retry">重试</button>' : '') + '</div>';
@@ -1622,21 +1621,46 @@
     });
   }
 
-  /** Both entry points share a reader, while their source labels remain explicit. */
-  function openChanges(sid, files, index, source, loader) {
-    PDToolView.dismiss();
-    PDChanges.open({ sid: sid, files: files, index: index, source: source, copy: copyText,
-      load: loader || function (file, signal) {
-        if (!file.ref) { return Promise.resolve(null); }
-        return api('GET', P + '/api/sessions/' + encodeURIComponent(sid) + '/diff?ref=' + encodeURIComponent(file.ref), undefined, 45000, signal).then(function (r) { return r.diff; });
+  function sessionRoot(s) {
+    var ws = s && wsById(s.workspaceId), root = ws ? ws.rootPath : s && s.workspaceId === 'computer' ? '/' : '';
+    if (s && s.cwd && s.cwd !== '.') root = /^(\/|[A-Za-z]:[\\/])/.test(s.cwd) ? s.cwd : root ? root.replace(/\/$/, '') + '/' + s.cwd : '';
+    return root;
+  }
+  function sidebarOptions(sid) {
+    var s = session(sid), root = sessionRoot(s), ws = wsById(s.workspaceId), cwd = s.cwd === '.' ? '' : s.cwd || '';
+    if (/^\//.test(cwd)) cwd = ws ? cwd.slice(ws.rootPath.replace(/\/$/, '').length).replace(/^\//, '') : cwd.replace(/^\//, '');
+    var base = P + '/api/ws/' + encodeURIComponent(s.workspaceId), diff = P + '/api/sessions/' + encodeURIComponent(sid) + '/diff';
+    function path(p) { return (cwd ? cwd + '/' : '') + p; }
+    function fileURL(p) { return base + '/file?path=' + encodeURIComponent(path(p)); }
+    return { sid: sid, root: root, rootName: root.split('/').filter(Boolean).pop() || '会话目录', icon: icon, isImage: isImage, fileURL: fileURL,
+      list: function (dir, signal) {
+        return api('GET', base + '/list?hidden=1&counts=0&path=' + encodeURIComponent(path(dir) || '.'), undefined, 45000, signal).then(function (r) {
+          return (r.entries || []).map(function (f) { return Object.assign({}, f, { path: (dir ? dir + '/' : '') + f.name, abs: root.replace(/\/$/, '') + '/' + (dir ? dir + '/' : '') + f.name }); });
+        });
       },
-      openFile: function (file, reveal) {
-        if (!file.abs) { return; }
-        if (!reveal && isImage(file.abs)) { imagePreview(file.path + ' · 当前文件', '/admin/api/local-file?path=' + encodeURIComponent(file.abs), ''); return; }
-        var path = reveal && /^(D|deleted|Delete)$/.test(file.status) ? file.abs.replace(/[\\/][^\\/]*$/, '') : file.abs;
-        api('POST', '/admin/api/open', { which: 'abs', path: path, reveal: reveal }).catch(function (e) { toast(e.message); });
-      }
-    });
+      read: function (p, signal) {
+        return fetch(fileURL(p), { credentials: 'same-origin', signal: signal, headers: { Range: 'bytes=0-262143' } }).then(function (res) {
+          if (res.status === 416 && res.headers.get('Content-Range') === 'bytes */0') return { text: '', truncated: false };
+          return res.text().then(function (text) {
+            if (!res.ok) { var error; try { error = JSON.parse(text); } catch (_) {} throw new Error(error && error.message || '无法读取文件'); }
+            var total = /\/(\d+)$/.exec(res.headers.get('Content-Range') || '');
+            return { text: text, truncated: !!total && +total[1] > 262144 };
+          });
+        });
+      },
+      loadDiffs: function (signal) { return api('GET', diff, undefined, 45000, signal).then(function (r) { return { files: r.files || [], source: r.git ? '当前工作目录的未提交改动' : '本会话记录的改动' }; }); },
+      loadDiff: function (file, signal) {
+        if (file.lines) return Promise.resolve(file.lines.join('\n'));
+        if (file.binary) return Promise.resolve(null);
+        var query = file.ref ? 'ref=' + encodeURIComponent(file.ref) : 'path=' + encodeURIComponent(file.path);
+        return api('GET', diff + '?' + query, undefined, 45000, signal).then(function (r) { return r.diff; });
+      },
+      openFile: function (file) { if (file.abs) api('POST', '/admin/api/open', { which: 'abs', path: file.abs }).catch(function (e) { toast(e.message); }); }
+    };
+  }
+  function openChanges(sid, files, index, source) {
+    PDToolView.dismiss();
+    PDChanges.open(Object.assign(sidebarOptions(sid), { diff: { files: files, index: index, source: source } }));
   }
 
   /** popMenu：在指定位置弹出菜单 */
@@ -2286,19 +2310,6 @@
           '<button class="pd-btn" data-act="file-open" data-seq="' + t.dataset.seq + '">' + icon('external-link', 16) + '打开</button>' +
           '<button class="pd-btn" data-act="file-reveal" data-seq="' + t.dataset.seq + '">' + icon('folder-open', 16) + '显示</button>', t.dataset.seq);
         break;
-      case 'diff-open':
-        if (isImage(t.dataset.abs)) {
-          imagePreview(t.dataset.abs.split(/[\\/]/).pop(), '/admin/api/local-file?path=' + encodeURIComponent(t.dataset.abs),
-            '<button class="pd-btn" data-act="diff-open-app" data-abs="' + esc(t.dataset.abs) + '">' + icon('external-link', 16) + '打开</button>' +
-            '<button class="pd-btn" data-act="diff-reveal" data-abs="' + esc(t.dataset.abs) + '">' + icon('folder-open', 16) + '显示</button>');
-          break;
-        }
-      case 'diff-open-app':
-        api('POST', '/admin/api/open', { which: 'abs', path: t.dataset.abs }).catch(function (er) { toast(er.message); });
-        break;
-      case 'diff-reveal':
-        api('POST', '/admin/api/open', { which: 'abs', path: t.dataset.gone === '1' ? t.dataset.abs.replace(/[\\/][^\\/]*$/, '') : t.dataset.abs, reveal: t.dataset.gone !== '1' }).catch(function (er) { toast(er.message); });
-        break;
       case 'file-open':
       case 'file-reveal':
         api('POST', '/admin/api/assistant/open', { seq: +t.dataset.seq, reveal: act === 'file-reveal' }).catch(function (er) { toast(er.message); });
@@ -2361,6 +2372,7 @@
         api('POST', '/admin/api/notify/test', { kind: document.getElementById('nkind').value, url: document.getElementById('nurl').value.trim(), topic: document.getElementById('ntopic').value.trim() })
           .then(function () { toast('已发出，请看手机是否收到'); }).catch(function (er) { toast(er.message); });
         break;
+      case 'files-sidebar': PDToolView.dismiss(); PDChanges.toggle(sidebarOptions(sid)); break;
       case 'history-open': openHistory(session(sid)); break;
       case 'chat-more':
         var rect = t.getBoundingClientRect(), s = session(sid);

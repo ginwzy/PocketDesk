@@ -30,6 +30,13 @@ def free_port():
 def fixture(root, binary):
     workspace = root / 'workspace'
     workspace.mkdir()
+    project = workspace / 'project'; project.mkdir()
+    for i in range(10000): (project / f'module-{i:05d}.js').write_text(f'const current = {i};\n')
+    (project / 'nested').mkdir(); (project / 'nested/current.js').write_text('const current = \"<current>\";\n')
+    (project / 'empty.txt').touch()
+    (project / 'large.txt').write_text('x' * 300000)
+    (project / 'image.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="green"/></svg>')
+    (workspace / 'outside.txt').write_text('outside session directory')
     key = secrets.token_hex(24)
     (root / 'admin.key').write_text(key)
     port = free_port()
@@ -59,7 +66,15 @@ def fixture(root, binary):
                 time.sleep(.1)
         workspaces = api('/admin/p/api/ws')
         ws = next(w for w in workspaces if w['rootPath'] == str(workspace))
-        session = api('/admin/p/api/sessions', {'kind': 'pi', 'workspaceId': ws['id'], 'cwd': '.'})['id']
+        session = api('/admin/p/api/sessions', {'kind': 'pi', 'workspaceId': ws['id'], 'cwd': 'project'})['id']
+        computer_session = api('/admin/p/api/sessions', {'kind': 'pi', 'workspaceId': 'computer', 'cwd': str(project)})['id']
+        repo = workspace / 'repository'; repo.mkdir()
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        (repo / 'current.js').write_text('const version = \"before\";\n')
+        subprocess.run(['git', '-C', str(repo), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline'], check=True)
+        (repo / 'current.js').write_text('const version = \"after\";\n')
+        git_session = api('/admin/p/api/sessions', {'kind': 'pi', 'workspaceId': ws['id'], 'cwd': 'repository'})['id']
         files = [{'path': f'src/group-{i // 100:03d}/module-{i:05d}.js', 'ref': f'changes-{i}',
                   'abs': str(workspace / f'module-{i:05d}.js'), 'status': 'modified', 'added': 2, 'removed': 2} for i in range(10000)]
         files[3].update(binary=True, ref='', status='added')
@@ -85,7 +100,7 @@ def fixture(root, binary):
                 seq += 1
                 db.execute('insert into events values(?,?,?,?,?)', (session, seq, kind, json.dumps(data), now))
             db.execute('update sessions set last_seq=?,title=?,updated_at=? where id=?', (seq, '变更预览验收', now, session))
-        return proc, log, base, key, session
+        return proc, log, base, key, session, computer_session, git_session
     except BaseException:
         proc.terminate()
         proc.wait(timeout=10)
@@ -93,7 +108,7 @@ def fixture(root, binary):
         raise
 
 
-async def check(base, key, session, args):
+async def check(base, key, session, computer_session, git_session, args):
     async with async_playwright() as playwright:
         engine = getattr(playwright, args.browser)
         launch = {'headless': True}
@@ -118,136 +133,165 @@ async def check(base, key, session, args):
         await page.goto(f'{base}/?k={key}#chat/{session}')
         await expect(page.locator('.pd-diff-row')).to_have_count(8)
         await page.locator('#input').fill('保留这份草稿')
+        directory_start = time.monotonic()
+        await page.locator('[data-act="files-sidebar"]').click()
+        await expect(page.locator('#change-view')).to_be_visible()
+        await expect(page.locator('#change-view [role="tab"]')).to_have_count(2)
+        await expect(page.locator('#ch-tab-files')).to_have_attribute('aria-selected', 'true')
+        await expect(page.locator('.ch-file')).not_to_have_count(0)
+        directory_ready = time.monotonic() - directory_start
+        assert await page.locator('.ch-file').count() <= 40
+        assert len(requests) == 0, 'opening files must not load diffs'
+        identity = await page.locator('#change-view').evaluate('e => {e.testIdentity=123;return e.testIdentity}')
+        await page.locator('.ch-filter').fill('nested')
+        await expect(page.locator('.ch-file')).to_have_count(1)
+        await page.locator('.ch-file').click()
+        await expect(page.locator('.ch-location > span')).to_have_text('nested')
+        await page.locator('.ch-file').click()
+        await expect(page.locator('.ch-file-text')).to_contain_text('<current>')
+        assert await page.locator('.ch-file-text script').count() == 0
+        await page.locator('[data-change="back"]').click()
+        await expect(page.locator('.ch-file')).to_have_count(1)
+        await page.locator('[data-change="up"]').click()
+        await expect(page.locator('.ch-filter')).to_be_visible()
+
+        async def browser_file(name):
+            await page.locator('.ch-filter').fill(name)
+            await expect(page.locator('.ch-file')).to_have_count(1)
+            await expect(page.locator('.ch-file strong')).to_have_text(name)
+            await page.locator('.ch-file').click()
+
+        await browser_file('empty.txt')
+        await expect(page.locator('.ch-file-text')).to_have_text('')
+        await page.locator('[data-change="back"]').click()
+        await browser_file('large.txt')
+        await expect(page.locator('.ch-scroll .ch-source')).to_contain_text('256 KB')
+        assert await page.locator('.ch-file-text').evaluate('e=>e.textContent.length') == 262144
+        await page.locator('[data-change="back"]').click()
+        await browser_file('image.svg')
+        await expect(page.locator('.ch-image')).to_be_visible()
+        await page.wait_for_function('document.querySelector(".ch-image").naturalWidth === 16')
+        await page.locator('[data-change="back"]').click()
+        await page.locator('.ch-filter').fill('')
+        await expect(page.locator('.ch-file')).not_to_have_count(1)
+        if args.screenshots:
+            await page.screenshot(path=str(args.screenshots / f'sidebar-{args.browser}-files.png'), animations='disabled')
+        await page.locator('#ch-tab-diff').click()
+        await expect(page.locator('.ch-file')).not_to_have_count(0)
+        await expect(page.locator('.ch-source')).to_contain_text('本会话记录的改动')
+        assert await page.locator('#change-view').evaluate('e=>e.testIdentity') == identity
+        assert len(requests) == 0, 'the diff list must not prefetch patches'
+        await page.locator('[data-act="files-sidebar"]').click()
+        await expect(page.locator('#change-view')).not_to_be_visible()
+
         start = time.monotonic()
         await page.get_by_text('查看全部 10000 个文件', exact=True).click()
         await expect(page.locator('.ch-code-row')).to_have_count(160)
         first_ready = time.monotonic() - start
         assert len(requests) == 1
-        assert await page.locator('.ch-file').count() <= 40
-        assert await page.locator('.ch-code-scroll').evaluate('e=>e.clientHeight') > 250
-        if args.screenshots:
-            await page.screenshot(path=str(args.screenshots / f'changes-{args.browser}-900.png'), animations='disabled')
-        await page.locator('[data-change="files"]').click()
-        await page.locator('#ch-filter').fill('é-索引')
-        await expect(page.locator('.ch-file')).to_have_count(1)
-        await expect(page.locator('.ch-file')).to_have_attribute('data-change-file', '9998')
-        await page.locator('#ch-filter').fill('')
-        await expect(page.locator('.ch-file[data-change-file="0"]')).to_be_visible()
-        await page.locator('.ch-files [data-change="hide-files"]').click()
-        await page.locator('[data-change="find"]').click()
-        await page.locator('#ch-search').fill('item49999')
-        await expect(page.locator('.ch-hits')).to_contain_text('1 / 1')
+        assert await page.locator('#ch-tab-diff').get_attribute('aria-selected') == 'true'
+        assert await page.locator('.ch-toolbar,.ch-find,.ch-resize,.ch-footer').count() == 0
+        assert await page.locator('.ch-code-scroll').evaluate('e=>e.clientHeight') > 350
+        await page.locator('.ch-code-scroll').evaluate('e=>e.scrollTop=1e9')
         await expect(page.locator('.ch-code-scroll')).to_contain_text('item49999')
-        await page.keyboard.press('Escape')
-        await expect(page.locator('#change-view')).to_be_visible()
+        assert await page.locator('.ch-code-row').count() <= 160
+        if args.screenshots:
+            await page.screenshot(path=str(args.screenshots / f'sidebar-{args.browser}-diff.png'), animations='disabled')
 
         async def select_file(index):
-            if not await page.locator('#ch-filter').is_visible():
-                await page.locator('[data-change="files"]').click()
-            await page.locator('#ch-filter').fill(f'module-{index:05d}')
+            await page.locator('[data-change="back"]').click()
+            await page.locator('.ch-filter').fill(f'module-{index:05d}')
             await expect(page.locator('.ch-file')).to_have_count(1)
             await expect(page.locator('.ch-file')).to_have_attribute('data-change-file', str(index))
             await page.locator('.ch-file').click()
-            await expect(page.locator('.ch-path')).to_contain_text(f'module-{index:05d}')
+            await expect(page.locator('.ch-location > span')).to_contain_text(f'module-{index:05d}')
 
         await select_file(9999)
-        await expect(page.locator('.ch-code-row')).to_have_count(7)
+        await expect(page.locator('.ch-code-scroll')).to_contain_text('new-9999 <tag>')
         assert len(requests) == 2
-        await page.locator('[data-change="copy"]').click()
-        assert 'new-9999 <tag>' in (await page.evaluate('window.testCopies'))[-1]
         await select_file(3)
-        await expect(page.locator('.ch-code-scroll')).to_contain_text('二进制文件没有文本差异')
+        await expect(page.locator('.ch-scroll')).to_contain_text('二进制文件没有文本差异')
         assert len(requests) == 2
         await select_file(4)
-        await expect(page.locator('[data-change="open"]')).to_be_disabled()
-        await expect(page.locator('.ch-code-row')).to_have_count(7)
+        await expect(page.locator('.ch-code-scroll')).to_contain_text('new-4')
         await select_file(0)
         await expect(page.locator('.ch-code-scroll')).to_contain_text('item49999')
         assert len(requests) == 3, 'revisiting a cached file should not fetch again'
+        await page.locator('#ch-tab-files').click()
+        assert await page.evaluate('window.activeWorkers') == 0
+        await page.locator('#ch-tab-diff').click()
+        await expect(page.locator('.ch-code-scroll')).to_contain_text('item49999')
+        assert len(requests) == 3
 
-        # Even a transport that ignores cancellation cannot publish a stale result.
-        await page.evaluate("""() => { window.realFetch=window.fetch;window.fetch=(url,opts)=>window.realFetch(url,String(url).endsWith('ref=changes-6')?{...opts,signal:undefined}:opts); }""")
+        # A late transport response must not replace the file browser after switching tabs.
         gate, started, delivered = asyncio.Event(), asyncio.Event(), asyncio.Event()
-
+        await page.evaluate("""() => { window.realFetch=window.fetch;window.fetch=(url,opts)=>window.realFetch(url,String(url).endsWith('ref=changes-6')?{...opts,signal:undefined}:opts); }""")
         async def slow(route):
-            response = await route.fetch()
-            started.set()
-            await gate.wait()
-            await route.fulfill(response=response)
-            delivered.set()
-
+            response = await route.fetch(); started.set(); await gate.wait()
+            await route.fulfill(response=response); delivered.set()
         await page.route('**/diff?ref=changes-6', slow, times=1)
-        await select_file(6)
-        await started.wait()
-        await select_file(7)
-        await expect(page.locator('.ch-code-scroll')).to_contain_text('new-7')
-        gate.set()
-        await delivered.wait()
+        await select_file(6); await started.wait()
+        await page.locator('#ch-tab-files').click(); gate.set(); await delivered.wait()
         await page.wait_for_timeout(100)
-        await expect(page.locator('.ch-code-scroll')).to_contain_text('new-7')
+        await expect(page.locator('#ch-tab-files')).to_have_attribute('aria-selected', 'true')
+        await expect(page.locator('.ch-file')).not_to_have_count(0)
+        assert await page.evaluate('window.activeWorkers') == 0
         await page.evaluate('window.fetch=window.realFetch')
+        await page.locator('#ch-tab-diff').click()
+        await expect(page.locator('.ch-code-scroll')).to_contain_text('new-6')
         await page.route('**/diff?ref=changes-8', lambda r: r.fulfill(status=503, content_type='application/json', body='{"message":"fixture retry"}'), times=1)
         await select_file(8)
-        await expect(page.locator('.ch-code-scroll')).to_contain_text('fixture retry')
+        await expect(page.locator('.ch-scroll')).to_contain_text('fixture retry')
         await page.locator('[data-change="retry"]').click()
         await expect(page.locator('.ch-code-scroll')).to_contain_text('new-8')
-        await select_file(9999)
-        await expect(page.locator('.ch-code-scroll')).to_contain_text('new-9999')
-        assert len(requests) == 8, 'bounded cache must evict old files'
         await select_file(2)
-        await expect(page.locator('.ch-code-scroll')).to_contain_text('150,000')
-        await page.locator('[data-change="copy"]').click()
-        copied = (await page.evaluate('window.testCopies'))[-1]
-        assert copied.count('\n') == 150001, 'render guard must preserve the full source for copying'
+        await expect(page.locator('.ch-scroll')).to_contain_text('150,000')
         await page.locator('[data-change="close"]').click()
-        await expect(page.locator('#input')).to_have_value('保留这份草稿')
         assert await page.evaluate('window.activeWorkers') == 0
+        await expect(page.locator('#input')).to_have_value('保留这份草稿')
         await page.locator('.pd-tool-group-head').click()
         await page.locator('.pd-tool-row').click()
         await expect(page.locator('.ch-source')).to_contain_text('工具提交的补丁')
         await expect(page.locator('.ch-code-row')).to_have_count(5)
         assert all(not text for text in await page.locator('.ch-number').all_text_contents())
-        await expect(page.locator('[data-change="open"]')).to_be_enabled()
-        await page.set_viewport_size({'width': 1900, 'height': 1000})
-        await page.locator('[data-change="split"]').click()
-        await expect(page.locator('.ch-code-table.split')).to_be_visible()
-        copied = await page.evaluate("""() => {
-          const cells=document.querySelectorAll('.ch-code-row.pair .ch-cell:first-child code');
-          const range=document.createRange();range.setStart(cells[0],0);range.setEnd(cells[1],cells[1].childNodes.length);
-          const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
-          const transfer=new DataTransfer();cells[0].dispatchEvent(new ClipboardEvent('copy',{bubbles:true,cancelable:true,clipboardData:transfer}));
-          selection.removeAllRanges();return transfer.getData('text/plain');
-        }""")
-        assert copied == 'const old = 1;\nconsole.log(old);', copied
-
+        await page.locator('#ch-tab-files').click()
+        await page.set_viewport_size({'width': 1700, 'height': 1000})
+        await expect(page.locator('#input')).to_be_visible()
+        await page.locator('#change-view').evaluate('e=>e.testIdentity=456')
+        await page.locator('.pd-diff-row [data-act="diff-ref"]').first.click()
+        await expect(page.locator('.ch-source')).to_contain_text('所选轮次')
+        await expect(page.locator('.ch-code-row')).to_have_count(160)
+        assert await page.locator('#change-view').evaluate('e=>e.testIdentity') == 456
+        await page.locator('#ch-tab-files').click()
+        assert await page.locator('#change-view').evaluate('e=>e.testIdentity') == 456
         if args.screenshots:
-            await page.screenshot(path=str(args.screenshots / f'changes-{args.browser}-wide.png'), animations='disabled')
-        await page.locator('[data-change="next"]').click()
-        await expect(page.locator('.ch-horizontal')).to_be_visible()
-        await page.locator('.ch-hbar').first.evaluate('e=>e.scrollLeft=200')
-        await expect(page.locator('.ch-cell .ch-line-text').first).to_have_css('transform', 'matrix(1, 0, 0, 1, -200, 0)')
-        await page.locator('.ch-hbar').first.evaluate('e=>e.scrollLeft=1e9')
-        await page.wait_for_function('()=>{const t=document.querySelector(".ch-cell .ch-line-text");return t.getBoundingClientRect().right<=t.parentElement.getBoundingClientRect().right+1}')
-        await page.locator('[data-change="wrap"]').click()
-        await expect(page.locator('.ch-horizontal')).not_to_be_visible()
-        await expect(page.locator('.ch-cell .ch-line-text').first).to_have_css('transform', 'none')
-        heights = await page.locator('.ch-code-row.pair .ch-cell').evaluate_all('els=>els.map(e=>e.getBoundingClientRect().height)')
-        assert heights[0] > 30 and abs(heights[0]-heights[1]) < 1, heights
-        width = await page.locator('#change-view').evaluate('e=>e.clientWidth')
-        await page.locator('.ch-resize').focus()
-        await page.keyboard.press('ArrowLeft')
-        await page.wait_for_function('(w)=>document.getElementById("change-view").clientWidth>=w+30', arg=width)
-        await page.evaluate("document.documentElement.dataset.theme='dark'")
-        if args.screenshots:
-            await page.screenshot(path=str(args.screenshots / f'changes-{args.browser}-dark.png'), animations='disabled')
+            await page.screenshot(path=str(args.screenshots / f'sidebar-{args.browser}-wide.png'), animations='disabled')
         await page.locator('[data-change="close"]').click()
-        assert await page.evaluate('window.activeWorkers') == 0
         await page.locator('.pd-tool-inspect-input').click()
         await expect(page.locator('#tool-inspector')).to_be_visible()
         await expect(page.locator('#change-view')).not_to_be_visible()
+        await page.goto(f'{base}/?k={key}#chat/{computer_session}')
+        await page.locator('[data-act="files-sidebar"]').click()
+        await expect(page.locator('.ch-location > span')).to_have_text('project')
+        await expect(page.locator('.ch-filter')).to_be_visible()
+        await page.locator('.ch-filter').fill('outside.txt')
+        await expect(page.locator('.ch-empty')).to_contain_text('没有匹配')
+        await page.goto(f'{base}/?k={key}#chat/{git_session}')
+        await page.locator('[data-act="files-sidebar"]').click()
+        await page.locator('#ch-tab-diff').click()
+        await expect(page.locator('.ch-source')).to_contain_text('未提交改动')
+        await expect(page.locator('.ch-file strong')).to_have_text('current.js')
+        await page.locator('.ch-file').click()
+        await expect(page.locator('.ch-code-scroll')).to_contain_text('before')
+        await expect(page.locator('.ch-code-scroll')).to_contain_text('after')
+        await page.evaluate("document.documentElement.dataset.theme='dark'")
+        if args.screenshots:
+            await page.screenshot(path=str(args.screenshots / f'sidebar-{args.browser}-dark.png'), animations='disabled')
+        await page.locator('[data-change="close"]').click()
+        assert await page.evaluate('window.activeWorkers') == 0
         assert not errors, errors
         print(json.dumps({'browser': args.browser, 'files': 10000, 'selectedFileLines': 50000,
-                          'firstReadySeconds': round(first_ready, 3), 'diffRequests': len(requests),
+                          'directoryReadySeconds': round(directory_ready, 3), 'firstReadySeconds': round(first_ready, 3), 'diffRequests': len(requests),
                           'longTasks': await page.evaluate("PerformanceObserver.supportedEntryTypes.includes('longtask') ? window.longTasks : null"), 'pageErrors': errors}))
         await browser.close()
 
@@ -263,9 +307,9 @@ def main():
         args.screenshots.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='pd-change-ui-') as folder:
         root = Path(folder)
-        proc, log, base, key, session = fixture(root, args.server.resolve())
+        proc, log, base, key, session, computer_session, git_session = fixture(root, args.server.resolve())
         try:
-            asyncio.run(asyncio.wait_for(check(base, key, session, args), timeout=60))
+            asyncio.run(asyncio.wait_for(check(base, key, session, computer_session, git_session, args), timeout=60))
         except BaseException:
             print((root / 'server.log').read_text()[-4000:])
             raise

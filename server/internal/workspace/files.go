@@ -41,9 +41,10 @@ type Entry struct {
 
 /** ListOptions：列目录参数 */
 type ListOptions struct {
-	Sort       string
-	Desc       bool
-	ShowHidden bool
+	Sort           string
+	Desc           bool
+	ShowHidden     bool
+	SkipChildCount bool
 }
 
 /** ETag：由大小与纳秒修改时间组成的强校验值 */
@@ -94,7 +95,9 @@ func List(root, rel string, opt ListOptions) ([]Entry, error) {
 		if e.IsDir {
 			e.Size = 0
 			e.DateFolder = naming.IsDateFolder(name)
-			e.ChildCount = countChildren(filepath.Join(abs, d.Name()), opt.ShowHidden)
+			if !opt.SkipChildCount {
+				e.ChildCount = countChildren(filepath.Join(abs, d.Name()), opt.ShowHidden)
+			}
 		}
 		out = append(out, e)
 	}

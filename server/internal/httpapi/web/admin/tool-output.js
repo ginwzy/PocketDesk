@@ -38,7 +38,7 @@
         var edits = p.edits.filter(function (e) { return typeof e.oldText === 'string' && typeof e.newText === 'string'; });
         if (edits.length) files = [{ path: path, action: 'Update', lines: edits.flatMap(function (e, i) { return ['@@ 替换片段 ' + (i + 1) + '（未提供原始行号） @@'].concat(e.oldText.split('\n').map(function (l) { return '-' + l; }), e.newText.split('\n').map(function (l) { return '+' + l; })); }) }];
       }
-      if (!files.length && path && typeof p.content === 'string') files = [{ path: path, action: 'Write', lines: ['@@ 写入内容（未提供旧版本） @@'].concat(p.content.split('\n').map(function (l) { return ' ' + l; })) }];
+      if (!files.length && path && typeof p.content === 'string') files = [{ path: path, action: 'Write', lines: ['@@ 写入内容（未提供旧版本） @@'].concat(p.content.split('\n').map(function (l) { return '+' + l; })) }];
       var params = typeof p === 'string' ? p : JSON.stringify(p, null, 2);
       if (typeof p !== 'string' && Object.keys(p).length === 1 && (command || text)) params = command || text;
       cached = { files: files, path: path, command: command, text: text, params: params === '{}' ? '' : params };
